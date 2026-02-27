@@ -232,30 +232,18 @@ func DownloadBinary(downloadURL, destPath string, progress func(int64, int64)) e
 	return nil
 }
 
-func extractTarGz(archivePath, destDir string) error {
+func extractTarGz(archivePath, destDir, tagName string) error {
 	cmd := exec.Command("tar", "-xzf", archivePath, "-C", destDir)
 	if err := cmd.Run(); err != nil {
 		return err
 	}
 
-	entries, err := os.ReadDir(destDir)
-	if err != nil {
-		return err
+	llamaDirName := "llama-" + tagName
+	info, err := os.Stat(filepath.Join(destDir, llamaDirName))
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("expected directory %s not found in archive", llamaDirName)
 	}
 
-	var llamaDirName string
-	for _, entry := range entries {
-		if entry.IsDir() && strings.HasPrefix(entry.Name(), "llama-") {
-			llamaDirName = entry.Name()
-			break
-		}
-	}
-
-	if llamaDirName == "" {
-		return fmt.Errorf("could not find llama directory in archive")
-	}
-
-	// Create/update 'llama-current' symlink pointing to the versioned directory
 	currentLink := filepath.Join(destDir, "llama-current")
 	if err := os.RemoveAll(currentLink); err != nil {
 		return fmt.Errorf("failed to remove existing llama-current: %w", err)
@@ -265,6 +253,20 @@ func extractTarGz(archivePath, destDir string) error {
 	}
 
 	return nil
+}
+
+func removeOldVersions(binDir, currentTag string) {
+	currentDir := "llama-" + currentTag
+	entries, err := os.ReadDir(binDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() && strings.HasPrefix(name, "llama-b") && name != currentDir {
+			os.RemoveAll(filepath.Join(binDir, name))
+		}
+	}
 }
 
 // StatusFunc is a callback for reporting installation progress messages.
@@ -304,12 +306,13 @@ func InstallLatest(status StatusFunc) (*VersionInfo, error) {
 		status("Extracting...")
 	}
 
-	if err := extractTarGz(archivePath, binDir); err != nil {
+	if err := extractTarGz(archivePath, binDir, release.TagName); err != nil {
 		return nil, fmt.Errorf("failed to extract archive: %w", err)
 	}
 
-	// Clean up tarball after successful extraction
+	// Clean up tarball and old versions after successful extraction
 	os.Remove(archivePath)
+	removeOldVersions(binDir, release.TagName)
 
 	cliPath := filepath.Join(binDir, "llama-current", "llama-cli")
 	versionInfo := &VersionInfo{
