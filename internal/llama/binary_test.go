@@ -3,6 +3,7 @@ package llama
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -398,6 +399,119 @@ func TestHasVulkanSupport(t *testing.T) {
 	t.Run("returns boolean on Linux", func(t *testing.T) {
 		// Just call it to ensure no panic
 		_ = HasVulkanSupport()
+	})
+}
+
+func TestExtractTarGz(t *testing.T) {
+	t.Run("symlinks to correct version by tag name", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		binDir := filepath.Join(tmpDir, "bin")
+		if err := os.MkdirAll(binDir, 0755); err != nil {
+			t.Fatalf("Failed to create bin dir: %v", err)
+		}
+
+		// Create a tarball containing llama-b8169 directory
+		srcDir := filepath.Join(tmpDir, "src")
+		llamaDir := filepath.Join(srcDir, "llama-b8169")
+		if err := os.MkdirAll(llamaDir, 0755); err != nil {
+			t.Fatalf("Failed to create llama dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(llamaDir, "llama-cli"), []byte("cli"), 0755); err != nil {
+			t.Fatalf("Failed to create binary: %v", err)
+		}
+
+		archivePath := filepath.Join(tmpDir, "test.tar.gz")
+		cmd := exec.Command("tar", "-czf", archivePath, "-C", srcDir, "llama-b8169")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to create archive: %v", err)
+		}
+
+		// Pre-create an older version directory to simulate upgrade scenario
+		oldDir := filepath.Join(binDir, "llama-b7786")
+		if err := os.MkdirAll(oldDir, 0755); err != nil {
+			t.Fatalf("Failed to create old dir: %v", err)
+		}
+		// Create old symlink pointing to old version
+		oldLink := filepath.Join(binDir, "llama-current")
+		if err := os.Symlink("llama-b7786", oldLink); err != nil {
+			t.Fatalf("Failed to create old symlink: %v", err)
+		}
+
+		if err := extractTarGz(archivePath, binDir, "b8169"); err != nil {
+			t.Fatalf("extractTarGz failed: %v", err)
+		}
+
+		// Verify symlink points to new version, not old
+		target, err := os.Readlink(filepath.Join(binDir, "llama-current"))
+		if err != nil {
+			t.Fatalf("Failed to read symlink: %v", err)
+		}
+		if target != "llama-b8169" {
+			t.Errorf("Expected symlink target llama-b8169, got %s", target)
+		}
+	})
+
+	t.Run("returns error when expected directory missing", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		binDir := filepath.Join(tmpDir, "bin")
+		if err := os.MkdirAll(binDir, 0755); err != nil {
+			t.Fatalf("Failed to create bin dir: %v", err)
+		}
+
+		// Create a tarball with a different directory name
+		srcDir := filepath.Join(tmpDir, "src")
+		llamaDir := filepath.Join(srcDir, "llama-b7786")
+		if err := os.MkdirAll(llamaDir, 0755); err != nil {
+			t.Fatalf("Failed to create llama dir: %v", err)
+		}
+
+		archivePath := filepath.Join(tmpDir, "test.tar.gz")
+		cmd := exec.Command("tar", "-czf", archivePath, "-C", srcDir, "llama-b7786")
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to create archive: %v", err)
+		}
+
+		err := extractTarGz(archivePath, binDir, "b9999")
+		if err == nil {
+			t.Error("Expected error when expected directory is missing")
+		}
+	})
+}
+
+func TestRemoveOldVersions(t *testing.T) {
+	t.Run("removes old llama-b* directories", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		// Create current and old version directories
+		os.MkdirAll(filepath.Join(tmpDir, "llama-b8169"), 0755)
+		os.MkdirAll(filepath.Join(tmpDir, "llama-b7786"), 0755)
+		os.MkdirAll(filepath.Join(tmpDir, "llama-b7000"), 0755)
+		// Non-matching entries should be left alone
+		os.MkdirAll(filepath.Join(tmpDir, "llama-current"), 0755)
+		os.WriteFile(filepath.Join(tmpDir, "version.json"), []byte("{}"), 0644)
+
+		removeOldVersions(tmpDir, "b8169")
+
+		// Current version should remain
+		if _, err := os.Stat(filepath.Join(tmpDir, "llama-b8169")); err != nil {
+			t.Error("Current version directory should not be removed")
+		}
+
+		// Old versions should be gone
+		if _, err := os.Stat(filepath.Join(tmpDir, "llama-b7786")); !os.IsNotExist(err) {
+			t.Error("Old version llama-b7786 should be removed")
+		}
+		if _, err := os.Stat(filepath.Join(tmpDir, "llama-b7000")); !os.IsNotExist(err) {
+			t.Error("Old version llama-b7000 should be removed")
+		}
+
+		// Non-matching entries should remain
+		if _, err := os.Stat(filepath.Join(tmpDir, "llama-current")); err != nil {
+			t.Error("llama-current should not be removed")
+		}
+		if _, err := os.Stat(filepath.Join(tmpDir, "version.json")); err != nil {
+			t.Error("version.json should not be removed")
+		}
 	})
 }
 
