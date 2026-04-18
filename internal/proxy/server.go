@@ -19,7 +19,6 @@ import (
 
 	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/logs"
-	"github.com/nchapman/lleme/internal/peer"
 	"github.com/nchapman/lleme/internal/version"
 )
 
@@ -29,8 +28,6 @@ type Server struct {
 	httpServer   *http.Server
 	manager      *ModelManager
 	idleMonitor  *IdleMonitor
-	discovery    *peer.Discovery
-	peerServer   *peer.Server
 	config       *Config
 	startedAt    time.Time
 	shutdownChan chan struct{}
@@ -58,22 +55,6 @@ func NewServer(cfg *Config, appCfg *config.Config) *Server {
 
 	// Create idle monitor
 	s.idleMonitor = NewIdleMonitor(manager, cfg.IdleTimeout, 60*time.Second)
-
-	// Create peer discovery - advertise the peer port, not the main server port
-	peerPort := appCfg.Peer.Port
-	if peerPort == 0 {
-		peerPort = 11314 // default
-	}
-	s.discovery = peer.NewDiscovery(
-		peerPort,
-		version.Version,
-		appCfg.Peer.Enabled,
-	)
-
-	// Create peer server for model sharing (runs on separate port, binds to 0.0.0.0)
-	if appCfg.Peer.Enabled {
-		s.peerServer = peer.NewServer(peerPort)
-	}
 
 	// Setup HTTP server
 	mux := http.NewServeMux()
@@ -110,20 +91,6 @@ func (s *Server) Start() error {
 	// Start idle monitor
 	s.idleMonitor.Start()
 
-	// Start peer server (for model sharing on separate port)
-	if s.peerServer != nil {
-		if err := s.peerServer.Start(); err != nil {
-			logs.Warn("Failed to start peer server", "error", err)
-		}
-	}
-
-	// Start peer discovery
-	if s.discovery != nil {
-		if err := s.discovery.Start(); err != nil {
-			logs.Warn("Failed to start peer discovery", "error", err)
-		}
-	}
-
 	ln, err := net.Listen("tcp", s.httpServer.Addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", s.httpServer.Addr, err)
@@ -144,16 +111,6 @@ func (s *Server) Start() error {
 // Stop gracefully stops the proxy server
 func (s *Server) Stop() error {
 	close(s.shutdownChan)
-
-	// Stop peer discovery
-	if s.discovery != nil {
-		s.discovery.Stop()
-	}
-
-	// Stop peer server
-	if s.peerServer != nil {
-		s.peerServer.Stop()
-	}
 
 	// Stop idle monitor
 	s.idleMonitor.Stop()
@@ -652,9 +609,4 @@ func (s *Server) handleStopAll(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"stopped": count,
 	})
-}
-
-// Discovery returns the peer discovery manager
-func (s *Server) Discovery() *peer.Discovery {
-	return s.discovery
 }

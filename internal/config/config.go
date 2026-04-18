@@ -17,13 +17,6 @@ type Config struct {
 	HuggingFace HuggingFace `yaml:"huggingface"`
 	Server      Server      `yaml:"server"`
 	LlamaCpp    LlamaCpp    `yaml:"llamacpp"`
-	Peer        Peer        `yaml:"peer"`
-}
-
-type Peer struct {
-	Enabled     bool     `yaml:"enabled"`      // Enable bidirectional peer-to-peer model sharing (default: false)
-	Port        int      `yaml:"port"`         // Port for peer sharing server (default: 11314)
-	StaticPeers []string `yaml:"static_peers"` // Static peer addresses (host:port) when mDNS discovery fails
 }
 
 type HuggingFace struct {
@@ -120,10 +113,6 @@ func DefaultConfig() *Config {
 				"http://[::1]",
 			},
 		},
-		Peer: Peer{
-			Enabled: false,
-			Port:    11314,
-		},
 	}
 }
 
@@ -149,14 +138,6 @@ server:
     - http://localhost
     - http://127.0.0.1
     - http://[::1]
-
-# Peer-to-peer model sharing
-# Share models with other lleme instances on your LAN (uses mDNS discovery)
-peer:
-  enabled: false  # Discover peers and share models bidirectionally
-  port: 11314     # Port for peer sharing (accessible from other machines)
-  # static_peers:  # Manually specify peers if mDNS doesn't work (e.g., across subnets)
-  #   - 192.168.1.100:11314
 
 # llama.cpp server settings
 # All options here are passed directly to llama-server.

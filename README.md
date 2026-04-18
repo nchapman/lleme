@@ -11,7 +11,6 @@ The easy way to find, run, and manage local LLMs.
 - 🤖 **Custom Personas**: Create and switch between custom personalities and system prompts for tailored interactions.
 - ⚡ **Universal API Support**: Acts as a local, drop-in replacement for both OpenAI and Anthropic APIs.
 - 🌐 **Web UI**: Chat with your models in a browser at `http://localhost:11313`.
-- 📡 **LAN Peer Sharing**: Share downloaded models with other lleme instances on your network.
 - ⚙️ **Powered by [llama.cpp](https://github.com/ggerganov/llama.cpp)**: Enjoy a zero-config start with smart defaults, or take full control with direct access to all underlying `llama.cpp` parameters.
 
 ## Install
@@ -126,21 +125,6 @@ A web UI is available at `http://localhost:11313` when the server is running.
 curl http://localhost:11313/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "unsloth/gpt-oss-20b-GGUF", "messages": [{"role": "user", "content": "Hello!"}]}'
-```
-
-## LAN Peer Sharing
-
-If you run lleme on multiple machines, enable peer sharing to download models from each other instead of Hugging Face. Uses mDNS for auto-discovery.
-
-```bash
-lleme config set peer.enabled true
-```
-
-When you pull a model, lleme checks if any peer on your network already has it and downloads from them instead (much faster over LAN).
-
-```bash
-lleme peer status  # Check if peer sharing is active
-lleme peer list    # Discover peers on your network
 ```
 
 ## Using with Claude Code

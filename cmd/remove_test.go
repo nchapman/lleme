@@ -345,6 +345,7 @@ func TestFindModelsSplitFiles(t *testing.T) {
 
 	if splitModel == nil {
 		t.Fatal("Split model not found")
+		return
 	}
 	if splitModel.Quant != "Q4_K_M" {
 		t.Errorf("Split model quant = %q, want Q4_K_M", splitModel.Quant)
@@ -357,6 +358,7 @@ func TestFindModelsSplitFiles(t *testing.T) {
 
 	if singleModel == nil {
 		t.Fatal("Single model not found")
+		return
 	}
 	if singleModel.Size != 1024*1024*50 {
 		t.Errorf("Single model size = %d, want %d", singleModel.Size, 1024*1024*50)

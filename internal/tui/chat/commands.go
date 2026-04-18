@@ -205,7 +205,7 @@ func (m *Model) showSettings() string {
 	var sb strings.Builder
 
 	sb.WriteString("Current Settings\n\n")
-	sb.WriteString(fmt.Sprintf("  Model: %s\n\n", m.model))
+	fmt.Fprintf(&sb, "  Model: %s\n\n", m.model)
 
 	// Show system prompt (truncated if long)
 	if len(m.chatMessages) > 0 && m.chatMessages[0].Role == "system" {
@@ -213,7 +213,7 @@ func (m *Model) showSettings() string {
 		if len(prompt) > 80 {
 			prompt = prompt[:77] + "..."
 		}
-		sb.WriteString(fmt.Sprintf("  System: %s\n\n", prompt))
+		fmt.Fprintf(&sb, "  System: %s\n\n", prompt)
 	}
 
 	// Request-time options

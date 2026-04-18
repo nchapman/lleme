@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/nchapman/lleme/internal/logs"
 )
 
 // PullResult contains the result of a model pull operation.
@@ -61,27 +59,18 @@ func GetManifestInfo(client *Client, user, repo string, quant Quantization) (*Ma
 	return info, manifest, manifestJSON, nil
 }
 
-// PeerDownloadFunc attempts to download a file from a peer by its SHA256 hash.
-// Returns (downloaded bool, error). Does NOT verify hash - caller handles verification.
-type PeerDownloadFunc func(hash, destPath string, size int64, progress func(downloaded, total int64)) (bool, error)
-
 // PullOptions configures a model pull operation.
 type PullOptions struct {
 	// Pre-fetched manifest to avoid duplicate API calls.
 	// If nil, PullModel will fetch it.
 	Manifest     *Manifest
 	ManifestJSON []byte
-
-	// PeerDownload is an optional function to try downloading from peers first.
-	// If provided and returns (true, nil), the HuggingFace download is skipped.
-	PeerDownload PeerDownloadFunc
 }
 
 // fileDownload tracks a file to download and its metadata.
 type fileDownload struct {
 	file     *ManifestFile
 	destPath string
-	fromPeer bool // true if downloaded from peer (needs verification with fallback)
 }
 
 // PullModel downloads a model from HuggingFace using the manifest API.
@@ -121,20 +110,13 @@ func PullModel(client *Client, user, repo string, quant Quantization, opts *Pull
 		return nil, err
 	}
 
-	// Get peer download function
-	var peerDownload PeerDownloadFunc
-	if opts != nil {
-		peerDownload = opts.PeerDownload
-	}
-
 	// Download all files
-	if err := downloadAllFiles(client, user, repo, files, peerDownload, result.TotalSize, progress); err != nil {
+	if err := downloadAllFiles(client, user, repo, files, result.TotalSize, progress); err != nil {
 		cleanupFiles(files, splitInfo, user, repo, quant)
 		return nil, err
 	}
 
-	// Verify all files (with fallback for peer downloads)
-	if err := verifyAllFiles(client, user, repo, files, result.TotalSize, progress); err != nil {
+	if err := verifyAllFiles(files, result.TotalSize, progress); err != nil {
 		cleanupFiles(files, splitInfo, user, repo, quant)
 		return nil, err
 	}
@@ -230,8 +212,8 @@ func buildFileList(user, repo string, quant Quantization, manifest *Manifest, sp
 	return files, nil
 }
 
-// downloadAllFiles downloads all files, trying peer first then HuggingFace.
-func downloadAllFiles(client *Client, user, repo string, files []fileDownload, peerDownload PeerDownloadFunc, totalSize int64, progress func(PullProgress)) error {
+// downloadAllFiles downloads all files from HuggingFace.
+func downloadAllFiles(client *Client, user, repo string, files []fileDownload, totalSize int64, progress func(PullProgress)) error {
 	downloaded := int64(0)
 
 	for i := range files {
@@ -247,37 +229,13 @@ func downloadAllFiles(client *Client, user, repo string, files []fileDownload, p
 			}
 		}
 
-		fromPeer, err := downloadFile(client, user, repo, fd.file, fd.destPath, peerDownload, progressFn)
-		if err != nil {
+		if err := downloadFromHF(client, user, repo, fd.file, fd.destPath, progressFn); err != nil {
 			return err
 		}
-		fd.fromPeer = fromPeer
 		downloaded += fd.file.Size
 	}
 
 	return nil
-}
-
-// downloadFile tries peer download first, falls back to HuggingFace.
-// Returns (fromPeer, error). Does NOT verify - that's handled separately.
-func downloadFile(client *Client, user, repo string, file *ManifestFile, destPath string, peerDownload PeerDownloadFunc, progress func(current, total int64)) (bool, error) {
-	// Try peer first if available
-	if peerDownload != nil && file.LFS != nil && file.LFS.SHA256 != "" {
-		downloaded, err := peerDownload(file.LFS.SHA256, destPath, file.Size, progress)
-		if err != nil {
-			logs.Debug("peer download failed, falling back to HuggingFace", "file", file.RFilename, "error", err)
-		}
-		if downloaded {
-			return true, nil
-		}
-	}
-
-	// Fall back to HuggingFace
-	if err := downloadFromHF(client, user, repo, file, destPath, progress); err != nil {
-		return false, err
-	}
-
-	return false, nil
 }
 
 // downloadFromHF downloads a file from HuggingFace.
@@ -296,15 +254,13 @@ func downloadFromHF(client *Client, user, repo string, file *ManifestFile, destP
 	return err
 }
 
-// verifyAllFiles verifies all downloaded files. If a peer-downloaded file fails,
-// retries from HuggingFace. HuggingFace download failures are fatal.
-func verifyAllFiles(client *Client, user, repo string, files []fileDownload, totalSize int64, progress func(PullProgress)) error {
+// verifyAllFiles verifies all downloaded files.
+func verifyAllFiles(files []fileDownload, totalSize int64, progress func(PullProgress)) error {
 	verified := int64(0)
 
 	for i := range files {
 		fd := &files[i]
 
-		// Skip if no hash to verify
 		if fd.file.LFS == nil || fd.file.LFS.SHA256 == "" {
 			verified += fd.file.Size
 			continue
@@ -322,31 +278,7 @@ func verifyAllFiles(client *Client, user, repo string, files []fileDownload, tot
 
 		if err := verifyFile(fd.destPath, fd.file.LFS.SHA256, progressFn); err != nil {
 			os.Remove(fd.destPath)
-
-			// If peer download failed verification, retry from HuggingFace
-			if fd.fromPeer {
-				downloadProgressFn := func(current, total int64) {
-					if progress != nil {
-						progress(PullProgress{
-							Phase:   "download",
-							Current: current,
-							Total:   fd.file.Size,
-						})
-					}
-				}
-
-				if err := downloadFromHF(client, user, repo, fd.file, fd.destPath, downloadProgressFn); err != nil {
-					return fmt.Errorf("failed to download %s from HuggingFace: %w", filepath.Base(fd.destPath), err)
-				}
-
-				// Verify the HF download
-				if err := verifyFile(fd.destPath, fd.file.LFS.SHA256, progressFn); err != nil {
-					os.Remove(fd.destPath)
-					return fmt.Errorf("verification failed for %s: %w", filepath.Base(fd.destPath), err)
-				}
-			} else {
-				return fmt.Errorf("verification failed for %s: %w", filepath.Base(fd.destPath), err)
-			}
+			return fmt.Errorf("verification failed for %s: %w", filepath.Base(fd.destPath), err)
 		}
 
 		verified += fd.file.Size
@@ -532,11 +464,6 @@ type ProgressDisplay interface {
 
 // ProgressDisplayFactory creates new progress displays.
 type ProgressDisplayFactory func() ProgressDisplay
-
-// PullModelWithProgress downloads a model with progress bar display.
-func PullModelWithProgress(client *Client, user, repo string, quant Quantization, opts *PullOptions) (*PullResult, error) {
-	return PullModelWithProgressFactory(client, user, repo, quant, opts, nil)
-}
 
 // PullModelWithProgressFactory downloads a model with customizable progress display.
 func PullModelWithProgressFactory(client *Client, user, repo string, quant Quantization, opts *PullOptions, factory ProgressDisplayFactory) (*PullResult, error) {

@@ -15,7 +15,6 @@ import (
 	"github.com/nchapman/lleme/internal/hf"
 	"github.com/nchapman/lleme/internal/llama"
 	"github.com/nchapman/lleme/internal/logs"
-	"github.com/nchapman/lleme/internal/peer"
 	"github.com/nchapman/lleme/internal/proxy"
 	"github.com/nchapman/lleme/internal/server"
 	"github.com/nchapman/lleme/internal/tui/chat"
@@ -232,9 +231,9 @@ func validateModel(query string, cfg *config.Config) (*proxy.DownloadedModel, er
 	// Ambiguous match - user needs to be more specific
 	if len(result.Matches) > 1 {
 		var b strings.Builder
-		b.WriteString(fmt.Sprintf("'%s' matches multiple models:\n\n", query))
+		fmt.Fprintf(&b, "'%s' matches multiple models:\n\n", query)
 		for _, m := range result.Matches {
-			b.WriteString(fmt.Sprintf("  %s\n", m.FullName))
+			fmt.Fprintf(&b, "  %s\n", m.FullName)
 		}
 		b.WriteString("\nSpecify the full model name to continue")
 		return nil, fmt.Errorf("%s", b.String())
@@ -259,11 +258,11 @@ func validateModel(query string, cfg *config.Config) (*proxy.DownloadedModel, er
 // modelNotFoundError returns a helpful error for models that aren't found
 func modelNotFoundError(query string, suggestions []proxy.DownloadedModel) error {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("no model matches '%s'", query))
+	fmt.Fprintf(&b, "no model matches '%s'", query)
 	if len(suggestions) > 0 {
 		b.WriteString("\n\nDid you mean:\n")
 		for _, s := range suggestions {
-			b.WriteString(fmt.Sprintf("  %s\n", s.FullName))
+			fmt.Fprintf(&b, "  %s\n", s.FullName)
 		}
 	} else {
 		b.WriteString("\n\n  Use 'lleme list' to see downloaded models\n  Use 'lleme search <query>' to find models")
@@ -306,9 +305,9 @@ func offerToPull(cfg *config.Config, user, repo, quant string) (*proxy.Downloade
 	} else {
 		if _, found := hf.FindQuantization(quants, quant); !found {
 			var b strings.Builder
-			b.WriteString(fmt.Sprintf("quantization '%s' not found\n\nAvailable:\n", quant))
+			fmt.Fprintf(&b, "quantization '%s' not found\n\nAvailable:\n", quant)
 			for _, q := range hf.SortQuantizations(quants) {
-				b.WriteString(fmt.Sprintf("  %s (%s)\n", q.Name, ui.FormatBytes(q.Size)))
+				fmt.Fprintf(&b, "  %s (%s)\n", q.Name, ui.FormatBytes(q.Size))
 			}
 			return nil, fmt.Errorf("%s", b.String())
 		}
@@ -338,21 +337,11 @@ func offerToPull(cfg *config.Config, user, repo, quant string) (*proxy.Downloade
 		ManifestJSON: manifestJSON,
 	}
 
-	// Add peer download support if enabled
-	if cfg.Peer.Enabled {
-		opts.PeerDownload = peer.CreateDownloader()
-	}
-
 	result, err := hf.PullModelWithProgressFactory(client, user, repo, selectedQuant, opts, func() hf.ProgressDisplay {
 		return ui.NewProgressBar()
 	})
 	if err != nil {
 		return nil, err
-	}
-
-	// Update peer sharing index
-	if err := peer.RebuildPeerFileIndex(); err != nil {
-		ui.PrintError("Failed to update peer index: %v", err)
 	}
 
 	if result.IsVision {
