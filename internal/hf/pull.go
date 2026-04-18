@@ -403,19 +403,7 @@ func isUpToDate(user, repo, quant string, remote *Manifest) (bool, bool) {
 
 	manifestData, err := os.ReadFile(manifestPath)
 	if err != nil {
-		if modelPath != "" {
-			modelInfo, statErr := os.Stat(modelPath)
-			if statErr == nil && modelInfo.Size() == remote.GGUFFile.Size {
-				if remote.MMProjFile != nil {
-					mmprojPath := GetMMProjFilePath(user, repo, quant)
-					if _, err := os.Stat(mmprojPath); err != nil {
-						return false, false
-					}
-				}
-				return true, true
-			}
-		}
-		return false, false
+		return checkSizeFallback(modelPath, user, repo, quant, remote)
 	}
 
 	var local Manifest
@@ -431,8 +419,7 @@ func isUpToDate(user, repo, quant string, remote *Manifest) (bool, bool) {
 		if !hashesMatch(local.MMProjFile, remote.MMProjFile) {
 			return false, false
 		}
-		mmprojPath := GetMMProjFilePath(user, repo, quant)
-		if _, err := os.Stat(mmprojPath); err != nil {
+		if !mmprojFileExists(user, repo, quant) {
 			return false, false
 		}
 	}
@@ -442,6 +429,27 @@ func isUpToDate(user, repo, quant string, remote *Manifest) (bool, bool) {
 	}
 
 	return true, false
+}
+
+// checkSizeFallback is used when no manifest exists: checks if the model file's
+// size matches the remote, which is sufficient to treat the model as up-to-date.
+func checkSizeFallback(modelPath, user, repo, quant string, remote *Manifest) (bool, bool) {
+	if modelPath == "" {
+		return false, false
+	}
+	info, err := os.Stat(modelPath)
+	if err != nil || info.Size() != remote.GGUFFile.Size {
+		return false, false
+	}
+	if remote.MMProjFile != nil && !mmprojFileExists(user, repo, quant) {
+		return false, false
+	}
+	return true, true
+}
+
+func mmprojFileExists(user, repo, quant string) bool {
+	_, err := os.Stat(GetMMProjFilePath(user, repo, quant))
+	return err == nil
 }
 
 func hashesMatch(local, remote *ManifestFile) bool {
@@ -467,43 +475,70 @@ type ProgressDisplayFactory func() ProgressDisplay
 
 // PullModelWithProgressFactory downloads a model with customizable progress display.
 func PullModelWithProgressFactory(client *Client, user, repo string, quant Quantization, opts *PullOptions, factory ProgressDisplayFactory) (*PullResult, error) {
-	var progressBar ProgressDisplay
-	var currentPhase string
+	var tracker *phaseTracker
+	if factory != nil {
+		tracker = &phaseTracker{factory: factory}
+	}
 
 	result, err := PullModel(client, user, repo, quant, opts, func(p PullProgress) {
-		if factory == nil {
+		if tracker == nil {
 			return
 		}
-		if p.Phase != currentPhase {
-			if progressBar != nil {
-				if currentPhase == "download" {
-					progressBar.Finish("Downloaded")
-				} else {
-					progressBar.Finish("Verified")
-				}
-			}
-			currentPhase = p.Phase
-			progressBar = factory()
-			if p.Phase == "download" {
-				progressBar.Start("", p.Total)
-			} else {
-				progressBar.Start("Verifying", p.Total)
-			}
+		if p.Phase != tracker.phase {
+			tracker.transition(p.Phase, p.Total)
 		}
-		if progressBar != nil {
-			progressBar.Update(p.Current, p.Total)
-		}
+		tracker.update(p.Current, p.Total)
 	})
 
-	if progressBar != nil {
-		if err != nil {
-			progressBar.Stop()
-		} else if currentPhase == "download" {
-			progressBar.Finish("Downloaded")
-		} else {
-			progressBar.Finish("Verified")
-		}
+	if tracker != nil {
+		tracker.done(err)
 	}
 
 	return result, err
+}
+
+type phaseTracker struct {
+	bar     ProgressDisplay
+	phase   string
+	factory ProgressDisplayFactory
+}
+
+func (pt *phaseTracker) transition(phase string, total int64) {
+	if pt.bar != nil {
+		pt.bar.Finish(phaseFinishLabel(pt.phase))
+	}
+	pt.phase = phase
+	pt.bar = pt.factory()
+	pt.bar.Start(phaseStartLabel(phase), total)
+}
+
+func (pt *phaseTracker) update(current, total int64) {
+	if pt.bar != nil {
+		pt.bar.Update(current, total)
+	}
+}
+
+func (pt *phaseTracker) done(err error) {
+	if pt.bar == nil {
+		return
+	}
+	if err != nil {
+		pt.bar.Stop()
+	} else {
+		pt.bar.Finish(phaseFinishLabel(pt.phase))
+	}
+}
+
+func phaseStartLabel(phase string) string {
+	if phase == "download" {
+		return ""
+	}
+	return "Verifying"
+}
+
+func phaseFinishLabel(phase string) string {
+	if phase == "download" {
+		return "Downloaded"
+	}
+	return "Verified"
 }

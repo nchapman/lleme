@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nchapman/lleme/internal/config"
+	"github.com/nchapman/lleme/internal/fileutil"
 	"github.com/nchapman/lleme/internal/version"
 )
 
@@ -299,8 +300,8 @@ func (c *Client) SearchModels(query string, limit int) ([]SearchResult, error) {
 }
 
 func (c *Client) DownloadFile(user, repo, branch, filename string, progress func(int64, int64)) (string, error) {
-	url := fmt.Sprintf("%s/%s/%s/resolve/%s/%s", baseURL, user, repo, branch, filename)
-	req, err := http.NewRequest("GET", url, nil)
+	fileURL := fmt.Sprintf("%s/%s/%s/resolve/%s/%s", baseURL, user, repo, branch, filename)
+	req, err := http.NewRequest("GET", fileURL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -322,28 +323,8 @@ func (c *Client) DownloadFile(user, repo, branch, filename string, progress func
 	}
 	defer out.Close()
 
-	size := resp.ContentLength
-	written := int64(0)
-	buf := make([]byte, 32*1024)
-
-	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			_, werr := out.Write(buf[:n])
-			if werr != nil {
-				return "", werr
-			}
-			written += int64(n)
-			if progress != nil {
-				progress(written, size)
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return "", err
-		}
+	if _, err := fileutil.StreamBody(resp.Body, out, 0, resp.ContentLength, progress); err != nil {
+		return "", err
 	}
 
 	finalPath := filepath.Join(config.BinPath(), filename)

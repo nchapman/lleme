@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/nchapman/lleme/internal/config"
+	"github.com/nchapman/lleme/internal/hf"
 )
 
 // TemplatePatch defines a single, focused fix for a chat template issue.
@@ -137,116 +138,80 @@ func extractChatTemplate(modelPath string) (string, error) {
 	}
 	defer f.Close()
 
-	// Read GGUF magic number
-	magic := make([]byte, 4)
-	if _, err := f.Read(magic); err != nil {
-		return "", fmt.Errorf("failed to read magic: %w", err)
-	}
-	if string(magic) != "GGUF" {
-		return "", fmt.Errorf("not a GGUF file")
+	kvCount, err := readGGUFTemplateHeader(f)
+	if err != nil {
+		return "", err
 	}
 
-	// Read and validate version (we support v2 and v3)
-	var version uint32
-	if err := binary.Read(f, binary.LittleEndian, &version); err != nil {
-		return "", fmt.Errorf("failed to read version: %w", err)
-	}
-	if version < 2 || version > 3 {
-		return "", fmt.Errorf("unsupported GGUF version %d (expected 2 or 3)", version)
-	}
-
-	// Read tensor and key-value counts
-	var tensorCount, kvCount uint64
-	if err := binary.Read(f, binary.LittleEndian, &tensorCount); err != nil {
-		return "", fmt.Errorf("failed to read tensor count: %w", err)
-	}
-	if err := binary.Read(f, binary.LittleEndian, &kvCount); err != nil {
-		return "", fmt.Errorf("failed to read kv count: %w", err)
-	}
-
-	// Scan key-value pairs for chat_template
 	for i := uint64(0); i < kvCount; i++ {
-		key, err := readGGUFString(f)
+		key, vtype, err := readGGUFKVKey(f)
 		if err != nil {
-			return "", fmt.Errorf("failed to read key: %w", err)
+			return "", err
 		}
-
-		var vtype uint32
-		if err := binary.Read(f, binary.LittleEndian, &vtype); err != nil {
-			return "", fmt.Errorf("failed to read value type: %w", err)
-		}
-
-		// Found it - read and return
 		if key == "tokenizer.chat_template" && vtype == 8 { // 8 = string
-			value, err := readGGUFString(f)
-			if err != nil {
-				return "", fmt.Errorf("failed to read chat template: %w", err)
-			}
-			return value, nil
+			return readGGUFTemplateString(f)
 		}
-
-		// Not what we want - skip this value
-		if err := skipGGUFValue(f, vtype); err != nil {
+		if err := hf.SkipGGUFValue(f, vtype); err != nil {
 			return "", fmt.Errorf("failed to skip value: %w", err)
 		}
 	}
 
-	return "", nil // No chat template found
+	return "", nil
 }
 
-// readGGUFString reads a length-prefixed string from a GGUF file.
-func readGGUFString(f *os.File) (string, error) {
+// readGGUFTemplateHeader reads and validates the GGUF preamble (magic, version,
+// tensor count, KV count) for supported v2/v3 files. Returns the KV count.
+func readGGUFTemplateHeader(f *os.File) (kvCount uint64, err error) {
+	magic := make([]byte, 4)
+	if _, err = f.Read(magic); err != nil {
+		return 0, fmt.Errorf("failed to read magic: %w", err)
+	}
+	if string(magic) != "GGUF" {
+		return 0, fmt.Errorf("not a GGUF file")
+	}
+	var version uint32
+	if err = binary.Read(f, binary.LittleEndian, &version); err != nil {
+		return 0, fmt.Errorf("failed to read version: %w", err)
+	}
+	if version < 2 || version > 3 {
+		return 0, fmt.Errorf("unsupported GGUF version %d (expected 2 or 3)", version)
+	}
+	var tensorCount uint64
+	if err = binary.Read(f, binary.LittleEndian, &tensorCount); err != nil {
+		return 0, fmt.Errorf("failed to read tensor count: %w", err)
+	}
+	if err = binary.Read(f, binary.LittleEndian, &kvCount); err != nil {
+		return 0, fmt.Errorf("failed to read kv count: %w", err)
+	}
+	return kvCount, nil
+}
+
+// readGGUFKVKey reads the key string and value type of a GGUF KV pair.
+func readGGUFKVKey(f *os.File) (key string, vtype uint32, err error) {
+	key, err = readGGUFTemplateString(f)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to read key: %w", err)
+	}
+	if err = binary.Read(f, binary.LittleEndian, &vtype); err != nil {
+		return "", 0, fmt.Errorf("failed to read value type: %w", err)
+	}
+	return key, vtype, nil
+}
+
+// readGGUFTemplateString reads a length-prefixed string from a GGUF file.
+func readGGUFTemplateString(f *os.File) (string, error) {
 	var length uint64
 	if err := binary.Read(f, binary.LittleEndian, &length); err != nil {
 		return "", err
+	}
+	if length > 1024*1024 {
+		return "", fmt.Errorf("string too long: %d", length)
 	}
 	data := make([]byte, length)
 	if _, err := f.Read(data); err != nil {
 		return "", err
 	}
 	return string(data), nil
-}
-
-// skipGGUFValue advances past a value of the given GGUF type.
-func skipGGUFValue(f *os.File, vtype uint32) error {
-	switch vtype {
-	case 0, 1, 7: // u8, i8, bool
-		_, err := f.Seek(1, 1)
-		return err
-	case 2, 3: // u16, i16
-		_, err := f.Seek(2, 1)
-		return err
-	case 4, 5, 6: // u32, i32, f32
-		_, err := f.Seek(4, 1)
-		return err
-	case 10, 11, 12: // u64, i64, f64
-		_, err := f.Seek(8, 1)
-		return err
-	case 8: // string
-		var length uint64
-		if err := binary.Read(f, binary.LittleEndian, &length); err != nil {
-			return err
-		}
-		_, err := f.Seek(int64(length), 1)
-		return err
-	case 9: // array
-		var atype uint32
-		if err := binary.Read(f, binary.LittleEndian, &atype); err != nil {
-			return err
-		}
-		var alen uint64
-		if err := binary.Read(f, binary.LittleEndian, &alen); err != nil {
-			return err
-		}
-		for j := uint64(0); j < alen; j++ {
-			if err := skipGGUFValue(f, atype); err != nil {
-				return err
-			}
-		}
-		return nil
-	default:
-		return fmt.Errorf("unknown GGUF value type: %d", vtype)
-	}
 }
 
 // writeTemplateCache writes a patched template to a cache file and returns its path.

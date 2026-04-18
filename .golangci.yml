@@ -3,3 +3,11 @@ linters:
   disable:
     - errcheck
     - unused
+  settings:
+    gocognit:
+      min-complexity: 15
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gocognit

@@ -232,7 +232,7 @@ func (m *Model) preloadModel() tea.Cmd {
 }
 
 // Update handles messages
-func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:gocognit // essential: bubbletea message dispatch
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {

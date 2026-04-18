@@ -66,27 +66,8 @@ func runUpdateAll(cmd *cobra.Command, args []string) {
 		(llamaInstalled == nil || llamaInstalled.TagName != llamaRelease.TagName)
 
 	// Display status
-	fmt.Println("  lleme:")
-	fmt.Printf("    %-12s %s\n", "Installed", llemeInstalled)
-	if llemeErr != nil {
-		fmt.Printf("    %-12s %s\n", "Available", ui.Muted("Failed to check"))
-	} else if llemeNeedsUpdate {
-		fmt.Printf("    %-12s %s\n", "Available", llemeLatest)
-	} else {
-		fmt.Printf("    %-12s %s %s\n", "Available", llemeLatest, ui.Success(ui.IconCheck))
-	}
-	fmt.Println()
-
-	fmt.Println("  llama.cpp:")
-	fmt.Printf("    %-12s %s\n", "Installed", llamaInstalledStr)
-	if llamaFetchErr != nil {
-		fmt.Printf("    %-12s %s\n", "Available", ui.Muted("Failed to check"))
-	} else if llamaNeedsUpdate {
-		fmt.Printf("    %-12s %s\n", "Available", llamaLatestStr)
-	} else {
-		fmt.Printf("    %-12s %s %s\n", "Available", llamaLatestStr, ui.Success(ui.IconCheck))
-	}
-	fmt.Println()
+	printComponentStatus("lleme", llemeInstalled, llemeLatest, llemeErr, llemeNeedsUpdate)
+	printComponentStatus("llama.cpp", llamaInstalledStr, llamaLatestStr, llamaFetchErr, llamaNeedsUpdate)
 
 	if llamaErr != nil {
 		ui.PrintError("Failed to check llama.cpp installed version: %v", llamaErr)
@@ -127,6 +108,19 @@ func runUpdateAll(cmd *cobra.Command, args []string) {
 	}
 
 	restartServerIfRunning()
+}
+
+func printComponentStatus(name, installed, available string, fetchErr error, needsUpdate bool) {
+	fmt.Printf("  %s:\n", name)
+	fmt.Printf("    %-12s %s\n", "Installed", installed)
+	if fetchErr != nil {
+		fmt.Printf("    %-12s %s\n", "Available", ui.Muted("Failed to check"))
+	} else if needsUpdate {
+		fmt.Printf("    %-12s %s\n", "Available", available)
+	} else {
+		fmt.Printf("    %-12s %s %s\n", "Available", available, ui.Success(ui.IconCheck))
+	}
+	fmt.Println()
 }
 
 func runUpdateLlama(cmd *cobra.Command, args []string) {

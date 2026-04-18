@@ -71,82 +71,55 @@ func (m *Model) handleCommand(input string) tea.Cmd {
 	}
 }
 
+type setOption struct {
+	useFloat bool
+	reload   bool
+	apply    func(*Model, float64, int)
+}
+
+var setOptions = map[string]setOption{
+	"temp":           {useFloat: true, apply: func(m *Model, f float64, _ int) { m.options.Temp = f }},
+	"temperature":    {useFloat: true, apply: func(m *Model, f float64, _ int) { m.options.Temp = f }},
+	"top-p":          {useFloat: true, apply: func(m *Model, f float64, _ int) { m.options.TopP = f }},
+	"repeat-penalty": {useFloat: true, apply: func(m *Model, f float64, _ int) { m.options.RepeatPenalty = f }},
+	"min-p":          {useFloat: true, apply: func(m *Model, f float64, _ int) { m.options.MinP = f }},
+	"top-k":          {apply: func(m *Model, _ float64, i int) { m.options.TopK = i }},
+	"ctx-size":       {reload: true, apply: func(m *Model, _ float64, i int) { m.options.CtxSize = i; m.options.CtxSizeSet = true }},
+	"gpu-layers":     {reload: true, apply: func(m *Model, _ float64, i int) { m.options.GpuLayers = i; m.options.GpuLayersSet = true }},
+	"threads":        {reload: true, apply: func(m *Model, _ float64, i int) { m.options.Threads = i; m.options.ThreadsSet = true }},
+}
+
 // handleSet processes the /set command
 func (m *Model) handleSet(option, value string) CommandResultMsg {
 	option = strings.ToLower(option)
 
-	floatVal, floatErr := strconv.ParseFloat(value, 64)
-	intVal, intErr := strconv.Atoi(value)
-
-	switch option {
-	case "temp", "temperature":
-		if floatErr != nil {
-			return CommandResultMsg{Message: fmt.Sprintf("Invalid value for temp: %s", value), IsError: true}
-		}
-		m.options.Temp = floatVal
-		return CommandResultMsg{Message: fmt.Sprintf("Set temp = %g", floatVal)}
-
-	case "top-p":
-		if floatErr != nil {
-			return CommandResultMsg{Message: fmt.Sprintf("Invalid value for top-p: %s", value), IsError: true}
-		}
-		m.options.TopP = floatVal
-		return CommandResultMsg{Message: fmt.Sprintf("Set top-p = %g", floatVal)}
-
-	case "top-k":
-		if intErr != nil {
-			return CommandResultMsg{Message: fmt.Sprintf("Invalid value for top-k: %s", value), IsError: true}
-		}
-		m.options.TopK = intVal
-		return CommandResultMsg{Message: fmt.Sprintf("Set top-k = %d", intVal)}
-
-	case "repeat-penalty":
-		if floatErr != nil {
-			return CommandResultMsg{Message: fmt.Sprintf("Invalid value for repeat-penalty: %s", value), IsError: true}
-		}
-		m.options.RepeatPenalty = floatVal
-		return CommandResultMsg{Message: fmt.Sprintf("Set repeat-penalty = %g", floatVal)}
-
-	case "min-p":
-		if floatErr != nil {
-			return CommandResultMsg{Message: fmt.Sprintf("Invalid value for min-p: %s", value), IsError: true}
-		}
-		m.options.MinP = floatVal
-		return CommandResultMsg{Message: fmt.Sprintf("Set min-p = %g", floatVal)}
-
-	case "ctx-size":
-		if intErr != nil {
-			return CommandResultMsg{Message: fmt.Sprintf("Invalid value for ctx-size: %s", value), IsError: true}
-		}
-		m.options.CtxSize = intVal
-		m.options.CtxSizeSet = true
-		m.pendingReload = true
-		return CommandResultMsg{Message: fmt.Sprintf("Set ctx-size = %d (use /reload to apply)", intVal)}
-
-	case "gpu-layers":
-		if intErr != nil {
-			return CommandResultMsg{Message: fmt.Sprintf("Invalid value for gpu-layers: %s", value), IsError: true}
-		}
-		m.options.GpuLayers = intVal
-		m.options.GpuLayersSet = true
-		m.pendingReload = true
-		return CommandResultMsg{Message: fmt.Sprintf("Set gpu-layers = %d (use /reload to apply)", intVal)}
-
-	case "threads":
-		if intErr != nil {
-			return CommandResultMsg{Message: fmt.Sprintf("Invalid value for threads: %s", value), IsError: true}
-		}
-		m.options.Threads = intVal
-		m.options.ThreadsSet = true
-		m.pendingReload = true
-		return CommandResultMsg{Message: fmt.Sprintf("Set threads = %d (use /reload to apply)", intVal)}
-
-	default:
+	opt, ok := setOptions[option]
+	if !ok {
 		return CommandResultMsg{
-			Message: fmt.Sprintf("Unknown option: %s\nOptions: temp, top-p, top-k, repeat-penalty, min-p, ctx-size, gpu-layers, threads", option),
+			Message: fmt.Sprintf("Unknown option: %s\nOptions: temp/temperature, top-p, top-k, repeat-penalty, min-p, ctx-size, gpu-layers, threads", option),
 			IsError: true,
 		}
 	}
+
+	if opt.useFloat {
+		fv, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return CommandResultMsg{Message: fmt.Sprintf("Invalid value for %s: %s", option, value), IsError: true}
+		}
+		opt.apply(m, fv, 0)
+		return CommandResultMsg{Message: fmt.Sprintf("Set %s = %g", option, fv)}
+	}
+
+	iv, err := strconv.Atoi(value)
+	if err != nil {
+		return CommandResultMsg{Message: fmt.Sprintf("Invalid value for %s: %s", option, value), IsError: true}
+	}
+	opt.apply(m, 0, iv)
+	if opt.reload {
+		m.pendingReload = true
+		return CommandResultMsg{Message: fmt.Sprintf("Set %s = %d (use /reload to apply)", option, iv)}
+	}
+	return CommandResultMsg{Message: fmt.Sprintf("Set %s = %d", option, iv)}
 }
 
 // handleReload reloads the model with new server options

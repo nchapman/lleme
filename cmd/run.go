@@ -270,6 +270,29 @@ func modelNotFoundError(query string, suggestions []proxy.DownloadedModel) error
 	return fmt.Errorf("%s", b.String())
 }
 
+// selectQuant returns the best matching quantization from the available list.
+// If quant is empty, it picks the best available; otherwise it validates the
+// requested quantization exists.
+func selectQuant(quants []hf.Quantization, quant string) (hf.Quantization, error) {
+	if quant == "" {
+		name := hf.GetBestQuantization(quants)
+		q, found := hf.FindQuantization(quants, name)
+		if !found {
+			return hf.Quantization{}, fmt.Errorf("internal error: best quantization %q not found in list", name)
+		}
+		return q, nil
+	}
+	if q, found := hf.FindQuantization(quants, quant); found {
+		return q, nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "quantization '%s' not found\n\nAvailable:\n", quant)
+	for _, q := range hf.SortQuantizations(quants) {
+		fmt.Fprintf(&b, "  %s (%s)\n", q.Name, ui.FormatBytes(q.Size))
+	}
+	return hf.Quantization{}, fmt.Errorf("%s", b.String())
+}
+
 // offerToPull checks HuggingFace and offers to download a model
 func offerToPull(cfg *config.Config, user, repo, quant string) (*proxy.DownloadedModel, error) {
 	client := hf.NewClient(cfg)
@@ -299,21 +322,10 @@ func offerToPull(cfg *config.Config, user, repo, quant string) (*proxy.Downloade
 		return nil, fmt.Errorf("'%s/%s' contains no GGUF files", user, repo)
 	}
 
-	// Select quantization
-	if quant == "" {
-		quant = hf.GetBestQuantization(quants)
-	} else {
-		if _, found := hf.FindQuantization(quants, quant); !found {
-			var b strings.Builder
-			fmt.Fprintf(&b, "quantization '%s' not found\n\nAvailable:\n", quant)
-			for _, q := range hf.SortQuantizations(quants) {
-				fmt.Fprintf(&b, "  %s (%s)\n", q.Name, ui.FormatBytes(q.Size))
-			}
-			return nil, fmt.Errorf("%s", b.String())
-		}
+	selectedQuant, err := selectQuant(quants, quant)
+	if err != nil {
+		return nil, err
 	}
-
-	selectedQuant, _ := hf.FindQuantization(quants, quant)
 
 	// Get manifest info for display (also returns manifest to pass to PullModel)
 	info, manifest, manifestJSON, err := hf.GetManifestInfo(client, user, repo, selectedQuant)
@@ -322,7 +334,7 @@ func offerToPull(cfg *config.Config, user, repo, quant string) (*proxy.Downloade
 	}
 
 	// Download the model
-	modelName := hf.FormatModelName(user, repo, quant)
+	modelName := hf.FormatModelName(user, repo, selectedQuant.Name)
 	if info.IsVision {
 		fmt.Printf("Downloading %s (%s + %s mmproj)...\n",
 			modelName, ui.FormatBytes(info.GGUFSize), ui.FormatBytes(info.MMProjSize))
@@ -355,7 +367,7 @@ func offerToPull(cfg *config.Config, user, repo, quant string) (*proxy.Downloade
 	return &proxy.DownloadedModel{
 		User:      user,
 		Repo:      repo,
-		Quant:     quant,
+		Quant:     selectedQuant.Name,
 		FullName:  modelName,
 		ModelPath: result.ModelPath,
 	}, nil

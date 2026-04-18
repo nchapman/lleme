@@ -153,43 +153,10 @@ func SavePersonaTemplate(name string, persona *Persona) error {
 	b.WriteString("#\n")
 	b.WriteString("# Run with: lleme run " + name + "\n\n")
 
-	if persona.Model != "" {
-		b.WriteString("model: " + persona.Model + "\n\n")
-	} else {
-		b.WriteString("# Base model (required, or specify at runtime)\n")
-		b.WriteString("# model: bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M\n\n")
-	}
-
-	if persona.System != "" {
-		b.WriteString("system: |\n")
-		for line := range strings.SplitSeq(persona.System, "\n") {
-			b.WriteString("  " + line + "\n")
-		}
-		b.WriteString("\n")
-	} else {
-		b.WriteString("# System prompt\n")
-		b.WriteString("# system: |\n")
-		b.WriteString("#   You are a helpful assistant.\n\n")
-	}
-
-	b.WriteString("# llama.cpp options (same as config llamacpp.options)\n")
-	b.WriteString("# options:\n")
-	b.WriteString("#   temp: 0.8\n")
-	b.WriteString("#   top-p: 0.9\n")
-	b.WriteString("#   top-k: 40\n")
-	b.WriteString("#   repeat-penalty: 1.0\n")
-
-	if len(persona.Options) > 0 {
-		b.WriteString("\noptions:\n")
-		optData, err := yaml.Marshal(persona.Options)
-		if err != nil {
-			return fmt.Errorf("failed to marshal options: %w", err)
-		}
-		for line := range strings.SplitSeq(string(optData), "\n") {
-			if line != "" {
-				b.WriteString("  " + line + "\n")
-			}
-		}
+	writePersonaModelSection(&b, persona)
+	writePersonaSystemSection(&b, persona)
+	if err := writePersonaOptionsSection(&b, persona); err != nil {
+		return err
 	}
 
 	path := PersonaPath(name)
@@ -197,6 +164,54 @@ func SavePersonaTemplate(name string, persona *Persona) error {
 		return fmt.Errorf("failed to write persona: %w", err)
 	}
 
+	return nil
+}
+
+func writePersonaModelSection(b *strings.Builder, persona *Persona) {
+	if persona.Model != "" {
+		b.WriteString("model: " + persona.Model + "\n\n")
+		return
+	}
+	b.WriteString("# Base model (required, or specify at runtime)\n")
+	b.WriteString("# model: bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M\n\n")
+}
+
+func writePersonaSystemSection(b *strings.Builder, persona *Persona) {
+	if persona.System != "" {
+		b.WriteString("system: |\n")
+		for line := range strings.SplitSeq(persona.System, "\n") {
+			b.WriteString("  " + line + "\n")
+		}
+		b.WriteString("\n")
+		return
+	}
+	b.WriteString("# System prompt\n")
+	b.WriteString("# system: |\n")
+	b.WriteString("#   You are a helpful assistant.\n\n")
+}
+
+func writePersonaOptionsSection(b *strings.Builder, persona *Persona) error {
+	b.WriteString("# llama.cpp options (same as config llamacpp.options)\n")
+	b.WriteString("# options:\n")
+	b.WriteString("#   temp: 0.8\n")
+	b.WriteString("#   top-p: 0.9\n")
+	b.WriteString("#   top-k: 40\n")
+	b.WriteString("#   repeat-penalty: 1.0\n")
+
+	if len(persona.Options) == 0 {
+		return nil
+	}
+
+	b.WriteString("\noptions:\n")
+	optData, err := yaml.Marshal(persona.Options)
+	if err != nil {
+		return fmt.Errorf("failed to marshal options: %w", err)
+	}
+	for line := range strings.SplitSeq(string(optData), "\n") {
+		if line != "" {
+			b.WriteString("  " + line + "\n")
+		}
+	}
 	return nil
 }
 

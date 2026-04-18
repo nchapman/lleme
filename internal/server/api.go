@@ -207,35 +207,9 @@ func (api *APIClient) StreamChatCompletion(ctx context.Context, req *ChatComplet
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-
-		line := scanner.Text()
-
-		if line == "" || line == "data: [DONE]" {
-			continue
-		}
-
-		if jsonData, found := strings.CutPrefix(line, "data: "); found {
-			var chunk StreamChunk
-			if err := json.Unmarshal([]byte(jsonData), &chunk); err != nil {
-				parseErrors++
-				lastParseErr = err
-				continue
-			}
-
-			if len(chunk.Choices) > 0 {
-				delta := chunk.Choices[0].Delta
-				if delta.ReasoningContent != "" && cb.ReasoningCallback != nil {
-					cb.ReasoningCallback(delta.ReasoningContent)
-				}
-				if delta.Content != "" && cb.ContentCallback != nil {
-					cb.ContentCallback(delta.Content)
-				}
-			}
-
-			// Call timings callback if we got timing stats (usually in final chunk)
-			if chunk.Timings != nil && cb.TimingsCallback != nil {
-				cb.TimingsCallback(chunk.Timings)
-			}
+		if err := handleStreamLine(scanner.Text(), cb); err != nil {
+			parseErrors++
+			lastParseErr = err
 		}
 	}
 
@@ -245,6 +219,38 @@ func (api *APIClient) StreamChatCompletion(ctx context.Context, req *ChatComplet
 
 	if parseErrors > 10 {
 		return fmt.Errorf("stream had %d JSON parse errors, last: %w", parseErrors, lastParseErr)
+	}
+
+	return nil
+}
+
+func handleStreamLine(line string, cb StreamCallback) error {
+	if line == "" || line == "data: [DONE]" {
+		return nil
+	}
+
+	jsonData, found := strings.CutPrefix(line, "data: ")
+	if !found {
+		return nil
+	}
+
+	var chunk StreamChunk
+	if err := json.Unmarshal([]byte(jsonData), &chunk); err != nil {
+		return err
+	}
+
+	if len(chunk.Choices) > 0 {
+		delta := chunk.Choices[0].Delta
+		if delta.ReasoningContent != "" && cb.ReasoningCallback != nil {
+			cb.ReasoningCallback(delta.ReasoningContent)
+		}
+		if delta.Content != "" && cb.ContentCallback != nil {
+			cb.ContentCallback(delta.Content)
+		}
+	}
+
+	if chunk.Timings != nil && cb.TimingsCallback != nil {
+		cb.TimingsCallback(chunk.Timings)
 	}
 
 	return nil

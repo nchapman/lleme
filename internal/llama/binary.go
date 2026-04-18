@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nchapman/lleme/internal/config"
+	"github.com/nchapman/lleme/internal/fileutil"
 	"github.com/nchapman/lleme/internal/version"
 )
 
@@ -200,36 +201,12 @@ func DownloadBinary(downloadURL, destPath string, progress func(int64, int64)) e
 	}
 	defer out.Close()
 
-	size := resp.ContentLength
-	written := int64(0)
-	buf := make([]byte, 32*1024)
-
-	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			if _, werr := out.Write(buf[:n]); werr != nil {
-				return werr
-			}
-			written += int64(n)
-			if progress != nil {
-				progress(written, size)
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-	}
-
-	out.Close()
-
-	if err := os.Rename(tmpPath, destPath); err != nil {
+	if _, err := fileutil.StreamBody(resp.Body, out, 0, resp.ContentLength, progress); err != nil {
 		return err
 	}
+	out.Close()
 
-	return nil
+	return os.Rename(tmpPath, destPath)
 }
 
 func extractTarGz(archivePath, destDir, tagName string) error {

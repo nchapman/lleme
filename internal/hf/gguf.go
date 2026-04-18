@@ -56,69 +56,66 @@ func ReadGGUFHeader(path string) (*GGUFHeader, error) {
 }
 
 func readGGUFHeader(r io.Reader) (*GGUFHeader, error) {
-	// Read and verify magic
-	magic := make([]byte, 4)
-	if _, err := io.ReadFull(r, magic); err != nil {
-		return nil, fmt.Errorf("failed to read magic: %w", err)
-	}
-	if string(magic) != ggufMagic {
-		return nil, fmt.Errorf("invalid GGUF magic: %q", string(magic))
-	}
-
-	// Read version
-	var version uint32
-	if err := binary.Read(r, binary.LittleEndian, &version); err != nil {
-		return nil, fmt.Errorf("failed to read version: %w", err)
-	}
-
-	// Read tensor count
-	var tensorCnt int64
-	if err := binary.Read(r, binary.LittleEndian, &tensorCnt); err != nil {
-		return nil, fmt.Errorf("failed to read tensor count: %w", err)
-	}
-
-	// Read KV count
-	var kvCnt int64
-	if err := binary.Read(r, binary.LittleEndian, &kvCnt); err != nil {
-		return nil, fmt.Errorf("failed to read kv count: %w", err)
+	version, tensorCnt, kvCnt, err := ReadGGUFPreamble(r)
+	if err != nil {
+		return nil, err
 	}
 
 	header := &GGUFHeader{
 		Version:   version,
-		TensorCnt: tensorCnt,
-		KVCnt:     kvCnt,
+		TensorCnt: int64(tensorCnt),
+		KVCnt:     int64(kvCnt),
 	}
 
-	// Read KV pairs to find split.count
-	for i := int64(0); i < kvCnt; i++ {
+	for i := uint64(0); i < kvCnt; i++ {
 		key, err := readGGUFString(r)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read key %d: %w", i, err)
 		}
 
-		var valType int32
+		var valType uint32
 		if err := binary.Read(r, binary.LittleEndian, &valType); err != nil {
 			return nil, fmt.Errorf("failed to read value type for key %q: %w", key, err)
 		}
 
-		// If this is the split.count key, read it as uint16
 		if key == keySplitCount && valType == ggufTypeUint16 {
 			var splitCount uint16
 			if err := binary.Read(r, binary.LittleEndian, &splitCount); err != nil {
 				return nil, fmt.Errorf("failed to read split.count: %w", err)
 			}
 			header.SplitCount = int(splitCount)
-			// We found what we need, no need to continue
 			return header, nil
 		}
 
-		// Skip the value
-		if err := skipGGUFValue(r, valType); err != nil {
+		if err := SkipGGUFValue(r, valType); err != nil {
 			return nil, fmt.Errorf("failed to skip value for key %q: %w", key, err)
 		}
 	}
 
 	return header, nil
+}
+
+// ReadGGUFPreamble reads and validates the GGUF magic, version, tensor count,
+// and KV count from an io.Reader, positioning it at the first KV pair.
+func ReadGGUFPreamble(r io.Reader) (version uint32, tensorCnt uint64, kvCnt uint64, err error) {
+	magic := make([]byte, 4)
+	if _, err = io.ReadFull(r, magic); err != nil {
+		return 0, 0, 0, fmt.Errorf("failed to read magic: %w", err)
+	}
+	if string(magic) != ggufMagic {
+		return 0, 0, 0, fmt.Errorf("invalid GGUF magic: %q", string(magic))
+	}
+
+	if err = binary.Read(r, binary.LittleEndian, &version); err != nil {
+		return 0, 0, 0, fmt.Errorf("failed to read version: %w", err)
+	}
+	if err = binary.Read(r, binary.LittleEndian, &tensorCnt); err != nil {
+		return 0, 0, 0, fmt.Errorf("failed to read tensor count: %w", err)
+	}
+	if err = binary.Read(r, binary.LittleEndian, &kvCnt); err != nil {
+		return 0, 0, 0, fmt.Errorf("failed to read kv count: %w", err)
+	}
+	return version, tensorCnt, kvCnt, nil
 }
 
 func readGGUFString(r io.Reader) (string, error) {
@@ -139,7 +136,8 @@ func readGGUFString(r io.Reader) (string, error) {
 	return string(data), nil
 }
 
-func skipGGUFValue(r io.Reader, valType int32) error {
+// SkipGGUFValue advances the reader past a GGUF value of the given type.
+func SkipGGUFValue(r io.Reader, valType uint32) error {
 	switch valType {
 	case ggufTypeUint8, ggufTypeInt8, ggufTypeBool:
 		_, err := io.CopyN(io.Discard, r, 1)
@@ -157,25 +155,19 @@ func skipGGUFValue(r io.Reader, valType int32) error {
 		_, err := readGGUFString(r)
 		return err
 	case ggufTypeArray:
-		// Read array type
-		var arrType int32
+		var arrType uint32
 		if err := binary.Read(r, binary.LittleEndian, &arrType); err != nil {
 			return err
 		}
-
-		// Read array length
 		var arrLen uint64
 		if err := binary.Read(r, binary.LittleEndian, &arrLen); err != nil {
 			return err
 		}
-
 		if arrLen > 1024*1024 { // Sanity check: 1M elements max
 			return fmt.Errorf("array too long: %d", arrLen)
 		}
-
-		// Skip array elements
 		for i := uint64(0); i < arrLen; i++ {
-			if err := skipGGUFValue(r, arrType); err != nil {
+			if err := SkipGGUFValue(r, arrType); err != nil {
 				return err
 			}
 		}
