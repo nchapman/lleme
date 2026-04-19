@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -80,7 +79,7 @@ func releaseConfig() binaryrelease.Config {
 // GetLatestVersion resolves the latest SwiftLM release and validates the
 // tag matches b<number>.
 func GetLatestVersion() (*binaryrelease.Release, error) {
-	release, err := binaryrelease.FetchLatestRelease(releaseConfig(), apiBase+"/releases/latest")
+	release, err := binaryrelease.FetchLatestRelease(context.Background(), releaseConfig(), apiBase+"/releases/latest")
 	if err != nil {
 		return nil, err
 	}
@@ -178,8 +177,7 @@ func versionedDirName(tagName string) string {
 }
 
 func extractTarGz(archivePath, destDir, tagName string) error {
-	cmd := exec.Command("tar", "-xzf", archivePath, "-C", destDir)
-	if err := cmd.Run(); err != nil {
+	if err := binaryrelease.ExtractTarGz(archivePath, destDir); err != nil {
 		return fmt.Errorf("extract %s: %w", archivePath, err)
 	}
 	versionDir := versionedDirName(tagName)
@@ -210,9 +208,14 @@ func pruneOldVersions(binDir, currentTag string) {
 		mtime time.Time
 	}
 	var prior []candidate
+	const prefix = "SwiftLM-b"
+	const suffix = "-macos-arm64"
 	for _, entry := range entries {
 		name := entry.Name()
-		if !entry.IsDir() || !strings.HasPrefix(name, "SwiftLM-b") || spare[name] {
+		if !entry.IsDir() || spare[name] {
+			continue
+		}
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
 			continue
 		}
 		info, err := entry.Info()

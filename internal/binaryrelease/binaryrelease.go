@@ -9,6 +9,8 @@
 package binaryrelease
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,10 +19,20 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/nchapman/lleme/internal/fileutil"
 )
+
+// maxAPIBodyBytes caps the size of a GitHub API response we'll buffer. Real
+// release JSON is tens of KiB; 1 MiB is generous headroom with a hard ceiling.
+const maxAPIBodyBytes = 1 << 20
+
+// tarEntryMode masks permission bits from archive entries. We allow the
+// standard user/group/other triplets but strip setuid/setgid/sticky so a
+// compromised archive can't install a setuid binary.
+const tarEntryMode os.FileMode = 0755
 
 // Config bundles the policy knobs a caller passes into Download and
 // FetchLatestRelease. Keeping policy per-call (rather than in package state)
@@ -87,12 +99,14 @@ func ValidateURL(cfg Config, rawURL string) error {
 
 // FetchLatestRelease GETs the given GitHub releases/latest URL and decodes
 // the response into a Release. The apiURL is passed in (not constructed from
-// a repo string) so callers can override it in tests.
-func FetchLatestRelease(cfg Config, apiURL string) (*Release, error) {
+// a repo string) so callers can override it in tests. Response body is
+// bounded by maxAPIBodyBytes and redirects are revalidated against cfg via
+// the shared client, so the allow-list holds end-to-end.
+func FetchLatestRelease(ctx context.Context, cfg Config, apiURL string) (*Release, error) {
 	if err := ValidateURL(cfg, apiURL); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -101,20 +115,20 @@ func FetchLatestRelease(cfg Config, apiURL string) (*Release, error) {
 		req.Header.Set("User-Agent", cfg.UserAgent)
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := newClient(cfg).Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
+	body := io.LimitReader(resp.Body, maxAPIBodyBytes)
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		errBody, _ := io.ReadAll(body)
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(errBody))
 	}
 
 	var release Release
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+	if err := json.NewDecoder(body).Decode(&release); err != nil {
 		return nil, err
 	}
 	return &release, nil
@@ -156,16 +170,14 @@ func Download(ctx context.Context, cfg Config, downloadURL, destPath string, pro
 	return nil
 }
 
-func fetch(ctx context.Context, cfg Config, downloadURL string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	if cfg.UserAgent != "" {
-		req.Header.Set("User-Agent", cfg.UserAgent)
-	}
-
-	client := &http.Client{
+// newClient builds the HTTP client used for every outbound request. The
+// CheckRedirect hook re-runs ValidateURL on each hop so the allow-list holds
+// across redirects; transport-level ResponseHeaderTimeout bounds connection
+// setup; the client Timeout bounds short metadata requests (callers pass
+// context for long downloads).
+func newClient(cfg Config) *http.Client {
+	return &http.Client{
+		Timeout:   30 * time.Second,
 		Transport: &http.Transport{ResponseHeaderTimeout: 30 * time.Second},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if err := ValidateURL(cfg, req.URL.String()); err != nil {
@@ -177,6 +189,21 @@ func fetch(ctx context.Context, cfg Config, downloadURL string) (*http.Response,
 			return nil
 		},
 	}
+}
+
+func fetch(ctx context.Context, cfg Config, downloadURL string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	if cfg.UserAgent != "" {
+		req.Header.Set("User-Agent", cfg.UserAgent)
+	}
+
+	// Downloads stream large bodies, so suppress the client-level deadline
+	// that newClient sets for metadata requests. CheckRedirect still applies.
+	client := newClient(cfg)
+	client.Timeout = 0
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -189,6 +216,10 @@ func fetch(ctx context.Context, cfg Config, downloadURL string) (*http.Response,
 	return resp, nil
 }
 
+// streamToFile copies src to tmpPath and returns the number of bytes it
+// wrote this call (independent of any StreamBody running-tally semantics).
+// The size cap is enforced via LimitReader(maxBytes+1); callers check the
+// returned count against their own max to detect a lying Content-Length.
 func streamToFile(src io.Reader, maxBytes, contentLength int64, tmpPath string, progress func(int64, int64)) (int64, error) {
 	out, err := os.Create(tmpPath)
 	if err != nil {
@@ -197,10 +228,131 @@ func streamToFile(src io.Reader, maxBytes, contentLength int64, tmpPath string, 
 	defer out.Close()
 
 	// Cap the body stream so a lying Content-Length can't fill the disk.
-	if maxBytes > 0 {
+	// The maxBytes+1 trick lets the caller detect the cap was hit (not a
+	// natural EOF). maxBytes < MaxInt64 is asserted by the caller — treat
+	// a nonsensical value as "no cap" rather than overflow to negative.
+	if maxBytes > 0 && maxBytes < (1<<62) {
 		src = io.LimitReader(src, maxBytes+1)
 	}
-	return fileutil.StreamBody(src, out, 0, contentLength, progress)
+	start := int64(0)
+	end, err := fileutil.StreamBody(src, out, start, contentLength, progress)
+	return end - start, err
+}
+
+// ExtractTarGz unpacks a .tar.gz archive into destDir, rejecting any entry
+// whose path would escape destDir (absolute paths, .. traversal, symlinks
+// pointing outside). Only regular files, directories, and same-tree
+// symlinks are extracted; hard links, devices, and setuid bits are dropped
+// so a malicious archive can't mutate files outside the extract tree.
+func ExtractTarGz(archivePath, destDir string) error {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("open archive: %w", err)
+	}
+	defer f.Close()
+
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("gzip reader: %w", err)
+	}
+	defer gz.Close()
+
+	absDest, err := filepath.Abs(destDir)
+	if err != nil {
+		return fmt.Errorf("resolve destination: %w", err)
+	}
+
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read archive: %w", err)
+		}
+		if err := extractEntry(tr, hdr, absDest); err != nil {
+			return err
+		}
+	}
+}
+
+// safeJoin returns absDest/rel, guaranteed to live under absDest. Rejects
+// absolute entry names, .. traversal, and any path that lexically or via
+// symlink resolution escapes absDest.
+func safeJoin(absDest, name string) (string, error) {
+	clean := filepath.Clean(name)
+	if filepath.IsAbs(clean) {
+		return "", fmt.Errorf("archive entry %q has absolute path", name)
+	}
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("archive entry %q escapes destination", name)
+	}
+	joined := filepath.Join(absDest, clean)
+	if joined != absDest && !strings.HasPrefix(joined, absDest+string(filepath.Separator)) {
+		return "", fmt.Errorf("archive entry %q escapes destination", name)
+	}
+	return joined, nil
+}
+
+func extractEntry(tr *tar.Reader, hdr *tar.Header, absDest string) error {
+	target, err := safeJoin(absDest, hdr.Name)
+	if err != nil {
+		return err
+	}
+	mode := os.FileMode(hdr.Mode) & tarEntryMode
+
+	switch hdr.Typeflag {
+	case tar.TypeDir:
+		return os.MkdirAll(target, mode|0755)
+	case tar.TypeReg:
+		return writeTarFile(tr, hdr, target, mode)
+	case tar.TypeSymlink:
+		return writeTarSymlink(hdr, target, absDest)
+	default:
+		// Silently skip hard links, devices, fifos, etc. They aren't needed
+		// for the artifacts we install and extracting them would broaden the
+		// attack surface.
+		return nil
+	}
+}
+
+func writeTarFile(tr *tar.Reader, hdr *tar.Header, target string, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		return fmt.Errorf("mkdir parent of %s: %w", hdr.Name, err)
+	}
+	out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode|0644)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", hdr.Name, err)
+	}
+	// Cap the per-entry copy so an inflated gzip bomb can't fill disk.
+	// hdr.Size<=0 means "unknown/empty"; clamp to a generous 8 GiB ceiling.
+	limit := hdr.Size
+	if limit <= 0 || limit > 1<<33 {
+		limit = 1 << 33
+	}
+	if _, err := io.CopyN(out, tr, limit); err != nil && err != io.EOF {
+		out.Close()
+		return fmt.Errorf("write %s: %w", hdr.Name, err)
+	}
+	return out.Close()
+}
+
+func writeTarSymlink(hdr *tar.Header, target, absDest string) error {
+	if filepath.IsAbs(hdr.Linkname) {
+		return fmt.Errorf("archive symlink %q has absolute target", hdr.Name)
+	}
+	resolved := filepath.Clean(filepath.Join(filepath.Dir(target), hdr.Linkname))
+	if resolved != absDest && !strings.HasPrefix(resolved, absDest+string(filepath.Separator)) {
+		return fmt.Errorf("archive symlink %q escapes destination", hdr.Name)
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		return fmt.Errorf("mkdir parent of %s: %w", hdr.Name, err)
+	}
+	// Remove any pre-existing entry so Symlink doesn't fail with EEXIST
+	// on a re-extraction.
+	_ = os.Remove(target)
+	return os.Symlink(hdr.Linkname, target)
 }
 
 // SwapCurrentSymlink atomically points <dir>/<linkName> at target by staging

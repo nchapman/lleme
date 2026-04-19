@@ -1,6 +1,9 @@
 package binaryrelease
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"net/http"
@@ -68,7 +71,7 @@ func TestFetchLatestRelease(t *testing.T) {
 	defer srv.Close()
 
 	cfg := testConfig(t, srv)
-	rel, err := FetchLatestRelease(cfg, srv.URL+"/releases/latest")
+	rel, err := FetchLatestRelease(context.Background(), cfg, srv.URL+"/releases/latest")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +85,7 @@ func TestFetchLatestReleaseRejectsDisallowedHost(t *testing.T) {
 		AllowedHosts:   map[string]bool{"api.github.com": true},
 		AllowedSchemes: DefaultHTTPSOnly(),
 	}
-	_, err := FetchLatestRelease(cfg, "https://evil.example.com/repos/x/y/releases/latest")
+	_, err := FetchLatestRelease(context.Background(), cfg, "https://evil.example.com/repos/x/y/releases/latest")
 	if err == nil || !strings.Contains(err.Error(), "allowlist") {
 		t.Errorf("err = %v, want allowlist rejection", err)
 	}
@@ -157,6 +160,118 @@ func TestDownloadRejectsDisallowedHost(t *testing.T) {
 	err := Download(context.Background(), cfg, "https://evil.example.com/a", "/tmp/x", nil)
 	if err == nil || !strings.Contains(err.Error(), "allowlist") {
 		t.Errorf("err = %v, want allowlist rejection", err)
+	}
+}
+
+// writeTarGz builds a .tar.gz in tmpDir from the given entries. Each entry
+// is (typeflag, name, linkname, body). Returns the archive path.
+type tarEntry struct {
+	typ      byte
+	name     string
+	linkname string
+	body     string
+}
+
+func writeTarGz(t *testing.T, entries []tarEntry) string {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for _, e := range entries {
+		hdr := &tar.Header{
+			Name:     e.name,
+			Typeflag: e.typ,
+			Mode:     0644,
+			Size:     int64(len(e.body)),
+			Linkname: e.linkname,
+		}
+		if e.typ == tar.TypeDir {
+			hdr.Mode = 0755
+			hdr.Size = 0
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		if e.typ == tar.TypeReg && e.body != "" {
+			if _, err := tw.Write([]byte(e.body)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(t.TempDir(), "arc.tar.gz")
+	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestExtractTarGzHappyPath(t *testing.T) {
+	arc := writeTarGz(t, []tarEntry{
+		{typ: tar.TypeDir, name: "pkg/"},
+		{typ: tar.TypeReg, name: "pkg/bin", body: "hello"},
+		{typ: tar.TypeSymlink, name: "pkg/link", linkname: "bin"},
+	})
+	dest := t.TempDir()
+	if err := ExtractTarGz(arc, dest); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "pkg", "bin"))
+	if err != nil || string(got) != "hello" {
+		t.Errorf("bin: got %q err %v", got, err)
+	}
+	target, err := os.Readlink(filepath.Join(dest, "pkg", "link"))
+	if err != nil || target != "bin" {
+		t.Errorf("link: got %q err %v", target, err)
+	}
+}
+
+func TestExtractTarGzRejectsPathTraversal(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry tarEntry
+	}{
+		{"absolute path", tarEntry{typ: tar.TypeReg, name: "/etc/evil", body: "x"}},
+		{"dotdot", tarEntry{typ: tar.TypeReg, name: "../escape", body: "x"}},
+		{"dotdot nested", tarEntry{typ: tar.TypeReg, name: "good/../../escape", body: "x"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			arc := writeTarGz(t, []tarEntry{tc.entry})
+			dest := t.TempDir()
+			err := ExtractTarGz(arc, dest)
+			if err == nil || !strings.Contains(err.Error(), "escape") && !strings.Contains(err.Error(), "absolute") {
+				t.Errorf("err = %v, want traversal rejection", err)
+			}
+		})
+	}
+}
+
+func TestExtractTarGzRejectsEscapingSymlink(t *testing.T) {
+	arc := writeTarGz(t, []tarEntry{
+		{typ: tar.TypeSymlink, name: "escape", linkname: "../../../outside"},
+	})
+	dest := t.TempDir()
+	err := ExtractTarGz(arc, filepath.Join(dest, "inner"))
+	if err == nil || !strings.Contains(err.Error(), "escape") {
+		t.Errorf("err = %v, want symlink escape rejection", err)
+	}
+}
+
+func TestExtractTarGzRejectsAbsoluteSymlink(t *testing.T) {
+	arc := writeTarGz(t, []tarEntry{
+		{typ: tar.TypeSymlink, name: "link", linkname: "/etc/passwd"},
+	})
+	dest := t.TempDir()
+	err := ExtractTarGz(arc, dest)
+	if err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Errorf("err = %v, want absolute-symlink rejection", err)
 	}
 }
 
