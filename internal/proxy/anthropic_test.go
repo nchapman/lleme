@@ -378,7 +378,7 @@ func TestTranslateAnthropicStream_HappyPath(t *testing.T) {
 		"event: content_block_stop",
 		"event: message_delta",
 		`"stop_reason":"end_turn"`,
-		`"input_tokens":5`,
+		// Per Anthropic spec, message_delta.usage carries only output_tokens.
 		`"output_tokens":2`,
 		"event: message_stop",
 	}
@@ -460,5 +460,613 @@ func TestCountAnthropicTokens_IncludesSystemAndBlocks(t *testing.T) {
 	}
 	if n != 6 {
 		t.Errorf("count = %d, want 6", n)
+	}
+}
+
+// --- Streaming spec-shape lock-ins ---
+
+// Decodes the SSE stream output into a slice of {event, data} records so
+// tests can assert shape at the JSON-object level instead of substring
+// hunting. The data string still holds the raw JSON payload.
+type sseEvent struct {
+	name string
+	data string
+}
+
+func decodeSSE(t *testing.T, raw string) []sseEvent {
+	t.Helper()
+	var events []sseEvent
+	for _, block := range strings.Split(raw, "\n\n") {
+		block = strings.TrimSpace(block)
+		if block == "" {
+			continue
+		}
+		var ev sseEvent
+		for _, line := range strings.Split(block, "\n") {
+			switch {
+			case strings.HasPrefix(line, "event: "):
+				ev.name = strings.TrimPrefix(line, "event: ")
+			case strings.HasPrefix(line, "data: "):
+				ev.data = strings.TrimPrefix(line, "data: ")
+			}
+		}
+		if ev.name != "" {
+			events = append(events, ev)
+		}
+	}
+	return events
+}
+
+func findEvent(events []sseEvent, name string) *sseEvent {
+	for i := range events {
+		if events[i].name == name {
+			return &events[i]
+		}
+	}
+	return nil
+}
+
+// content_block_start must carry the documented Anthropic shape:
+// {"type":"text","text":""}. The empty text key is required — Python/TS
+// SDK accumulators construct a TextBlock from this event and assume it.
+func TestTranslateAnthropicStream_ContentBlockStartShape(t *testing.T) {
+	upstream := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\ndata: [DONE]\n\n"
+	var buf bytes.Buffer
+	if err := translateAnthropicStream(&buf, strings.NewReader(upstream), "msg", "m"); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	ev := findEvent(decodeSSE(t, buf.String()), "content_block_start")
+	if ev == nil {
+		t.Fatal("no content_block_start emitted")
+	}
+	var payload struct {
+		Type         string `json:"type"`
+		Index        int    `json:"index"`
+		ContentBlock struct {
+			Type string  `json:"type"`
+			Text *string `json:"text"` // pointer so we can tell "missing" from ""
+		} `json:"content_block"`
+	}
+	if err := json.Unmarshal([]byte(ev.data), &payload); err != nil {
+		t.Fatalf("decode: %v\ndata=%s", err, ev.data)
+	}
+	if payload.ContentBlock.Type != "text" {
+		t.Errorf("content_block.type = %q, want text", payload.ContentBlock.Type)
+	}
+	if payload.ContentBlock.Text == nil {
+		t.Error(`content_block.text missing; Anthropic spec requires text:""`)
+	} else if *payload.ContentBlock.Text != "" {
+		t.Errorf(`content_block.text = %q, want ""`, *payload.ContentBlock.Text)
+	}
+}
+
+// Per spec, message_delta.usage carries only output_tokens (cumulative).
+// input_tokens belongs in message_start and must NOT appear here.
+func TestTranslateAnthropicStream_MessageDeltaUsageShape(t *testing.T) {
+	upstream := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":1,"total_tokens":8}}`,
+		`data: [DONE]`,
+		"",
+	}, "\n\n")
+	var buf bytes.Buffer
+	if err := translateAnthropicStream(&buf, strings.NewReader(upstream), "msg", "m"); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	ev := findEvent(decodeSSE(t, buf.String()), "message_delta")
+	if ev == nil {
+		t.Fatal("no message_delta emitted")
+	}
+	var payload struct {
+		Usage map[string]any `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(ev.data), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, present := payload.Usage["input_tokens"]; present {
+		t.Errorf("message_delta.usage must not contain input_tokens; got %v", payload.Usage)
+	}
+	if payload.Usage["output_tokens"] != float64(1) {
+		t.Errorf("output_tokens = %v, want 1", payload.Usage["output_tokens"])
+	}
+}
+
+// message_start always carries usage with input_tokens — we emit 0 as a
+// known limitation (prompt_tokens aren't known until the final usage chunk,
+// too late to backfill without buffering the whole stream).
+func TestTranslateAnthropicStream_MessageStartUsageZero(t *testing.T) {
+	upstream := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\ndata: [DONE]\n\n"
+	var buf bytes.Buffer
+	if err := translateAnthropicStream(&buf, strings.NewReader(upstream), "msg", "m"); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	ev := findEvent(decodeSSE(t, buf.String()), "message_start")
+	if ev == nil {
+		t.Fatal("no message_start emitted")
+	}
+	var payload struct {
+		Message struct {
+			ID           string  `json:"id"`
+			Type         string  `json:"type"`
+			Role         string  `json:"role"`
+			Model        string  `json:"model"`
+			StopReason   *string `json:"stop_reason"`
+			StopSequence *string `json:"stop_sequence"`
+			Usage        struct {
+				InputTokens  *int `json:"input_tokens"`
+				OutputTokens *int `json:"output_tokens"`
+			} `json:"usage"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(ev.data), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Message.ID != "msg" || payload.Message.Type != "message" || payload.Message.Role != "assistant" {
+		t.Errorf("message_start skeleton wrong: %+v", payload.Message)
+	}
+	if payload.Message.Usage.InputTokens == nil {
+		t.Fatal("message_start.usage.input_tokens missing; spec requires the key present")
+	}
+	// Currently 0 by design (see package-level known limitations). If a
+	// buffering strategy lands, this assertion is the signal to update the
+	// docs and the test together — it's the whole point of the lock-in.
+	if *payload.Message.Usage.InputTokens != 0 {
+		t.Errorf("message_start.usage.input_tokens = %d; documented as 0 — update docs + this test if buffering intentionally landed",
+			*payload.Message.Usage.InputTokens)
+	}
+}
+
+// An upstream chunk that carries both `content` and `finish_reason` on the
+// same choice must still emit the content delta AND the final stop_reason.
+func TestTranslateAnthropicStream_ContentAndFinishOnSameChunk(t *testing.T) {
+	upstream := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"content":"bye"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		"",
+	}, "\n\n")
+	var buf bytes.Buffer
+	if err := translateAnthropicStream(&buf, strings.NewReader(upstream), "msg", "m"); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	events := decodeSSE(t, buf.String())
+	if findEvent(events, "content_block_delta") == nil {
+		t.Error("content_block_delta missing when content arrived alongside finish_reason")
+	}
+	md := findEvent(events, "message_delta")
+	if md == nil || !strings.Contains(md.data, `"stop_reason":"end_turn"`) {
+		t.Errorf("message_delta.stop_reason not end_turn: %+v", md)
+	}
+}
+
+// Malformed or adversarial upstream: two finish chunks. Must emit exactly
+// one message_stop and one message_delta; state must not double-emit.
+func TestTranslateAnthropicStream_MultipleFinishChunks(t *testing.T) {
+	upstream := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"content":"a"},"finish_reason":"stop"}]}`,
+		`data: {"choices":[{"index":0,"delta":{"content":"b"},"finish_reason":"length"}]}`,
+		`data: [DONE]`,
+		"",
+	}, "\n\n")
+	var buf bytes.Buffer
+	if err := translateAnthropicStream(&buf, strings.NewReader(upstream), "msg", "m"); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	events := decodeSSE(t, buf.String())
+	countEv := func(name string) int {
+		n := 0
+		for _, e := range events {
+			if e.name == name {
+				n++
+			}
+		}
+		return n
+	}
+	if got := countEv("message_stop"); got != 1 {
+		t.Errorf("message_stop count = %d, want 1", got)
+	}
+	if got := countEv("message_delta"); got != 1 {
+		t.Errorf("message_delta count = %d, want 1", got)
+	}
+	// Which stop_reason wins is unspecified for this pathological input —
+	// only the frame-count invariant matters. We intentionally don't pin
+	// first-vs-last here.
+}
+
+// --- Request-side: forward-compat and rejection coverage ---
+
+// A trailing assistant message (prefill) is a legitimate Anthropic pattern;
+// the translator must pass it through so the backend can continue from it.
+func TestTranslateAnthropicRequest_PrefillAssistantPassedThrough(t *testing.T) {
+	in := []byte(`{
+		"model": "m",
+		"max_tokens": 20,
+		"messages": [
+			{"role": "user", "content": "begin"},
+			{"role": "assistant", "content": "ok, here we go:"}
+		]
+	}`)
+	out, _, err := translateAnthropicRequest(in)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var got openAIChatRequest
+	_ = json.Unmarshal(out, &got)
+	if len(got.Messages) != 2 {
+		t.Fatalf("got %d messages, want 2", len(got.Messages))
+	}
+	if got.Messages[1].Role != "assistant" {
+		t.Errorf("second message role = %q, want assistant (prefill)", got.Messages[1].Role)
+	}
+}
+
+// Prompt-caching fields (cache_control on system blocks) must not cause a 400.
+// We silently ignore them; clients that always attach them still work.
+func TestTranslateAnthropicRequest_CacheControlOnSystemIgnored(t *testing.T) {
+	in := []byte(`{
+		"model": "m",
+		"max_tokens": 5,
+		"system": [
+			{"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}}
+		],
+		"messages": [{"role": "user", "content": "hi"}]
+	}`)
+	if _, _, err := translateAnthropicRequest(in); err != nil {
+		t.Fatalf("cache_control on system should be ignored, got: %v", err)
+	}
+}
+
+// cache_control on a text content block must not cause a 400.
+func TestTranslateAnthropicRequest_CacheControlOnContentIgnored(t *testing.T) {
+	in := []byte(`{
+		"model": "m",
+		"max_tokens": 5,
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "cached bit", "cache_control": {"type": "ephemeral"}}
+			]
+		}]
+	}`)
+	if _, _, err := translateAnthropicRequest(in); err != nil {
+		t.Fatalf("cache_control on content should be ignored, got: %v", err)
+	}
+}
+
+// Unknown top-level fields (service_tier, metadata, thinking, container)
+// must be silently ignored for forward-compat with newer API shapes.
+func TestTranslateAnthropicRequest_UnknownTopLevelFieldsIgnored(t *testing.T) {
+	in := []byte(`{
+		"model": "m",
+		"max_tokens": 5,
+		"service_tier": "standard_only",
+		"metadata": {"user_id": "u_123"},
+		"container": "c_abc",
+		"thinking": {"type": "enabled"},
+		"cache_control": {"type": "ephemeral"},
+		"messages": [{"role": "user", "content": "hi"}]
+	}`)
+	if _, _, err := translateAnthropicRequest(in); err != nil {
+		t.Fatalf("unknown top-level fields should be ignored, got: %v", err)
+	}
+}
+
+// Document content blocks aren't supported by our translator (backend can't
+// consume them anyway). Reject with a clear 400 mentioning the type.
+func TestTranslateAnthropicRequest_DocumentBlockRejected(t *testing.T) {
+	in := []byte(`{
+		"model": "m",
+		"max_tokens": 5,
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "AAA="}}
+			]
+		}]
+	}`)
+	_, _, err := translateAnthropicRequest(in)
+	var te *translateError
+	if !errors.As(err, &te) || te.status != 400 {
+		t.Fatalf("got err %v, want 400", err)
+	}
+	if !strings.Contains(te.msg, "document") {
+		t.Errorf("error should mention block type; got %q", te.msg)
+	}
+}
+
+// Extended-thinking blocks and redacted_thinking blocks are not translated.
+func TestTranslateAnthropicRequest_ThinkingBlockRejected(t *testing.T) {
+	for _, blockType := range []string{"thinking", "redacted_thinking"} {
+		t.Run(blockType, func(t *testing.T) {
+			body := []byte(`{
+				"model": "m",
+				"max_tokens": 5,
+				"messages": [{
+					"role": "assistant",
+					"content": [{"type": "` + blockType + `", "thinking": "..."}]
+				}]
+			}`)
+			_, _, err := translateAnthropicRequest(body)
+			var te *translateError
+			if !errors.As(err, &te) || te.status != 400 {
+				t.Fatalf("got err %v, want 400", err)
+			}
+			// Make sure we fail for the right reason — not an unrelated
+			// 400 that happens to match status.
+			if !strings.Contains(te.msg, blockType) {
+				t.Errorf("error message should mention %q; got %q", blockType, te.msg)
+			}
+		})
+	}
+}
+
+// Vision URL sources aren't yet supported (only base64). Ensure clients
+// passing {type:"url", url:"..."} get a clear error rather than silent
+// malformation.
+func TestTranslateAnthropicRequest_ImageURLSourceRejected(t *testing.T) {
+	in := []byte(`{
+		"model": "m",
+		"max_tokens": 5,
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "image", "source": {"type": "url", "url": "https://example.com/x.png"}}
+			]
+		}]
+	}`)
+	_, _, err := translateAnthropicRequest(in)
+	var te *translateError
+	if !errors.As(err, &te) || te.status != 400 {
+		t.Fatalf("got err %v, want 400", err)
+	}
+	if !strings.Contains(te.msg, "base64") {
+		t.Errorf("error message should mention base64: %q", te.msg)
+	}
+}
+
+// tool_choice without tools should still be rejected (consistency — the
+// path is conceptually tool-related either way).
+func TestTranslateAnthropicRequest_ToolChoiceWithoutToolsRejected(t *testing.T) {
+	in := []byte(`{
+		"model": "m",
+		"max_tokens": 5,
+		"tool_choice": {"type": "auto"},
+		"messages": [{"role": "user", "content": "hi"}]
+	}`)
+	_, _, err := translateAnthropicRequest(in)
+	var te *translateError
+	if !errors.As(err, &te) || te.status != 400 {
+		t.Fatalf("got err %v, want 400", err)
+	}
+}
+
+// System array containing an image (or any non-text) block must be rejected;
+// Anthropic system is text-only.
+func TestTranslateAnthropicRequest_SystemWithNonTextBlockRejected(t *testing.T) {
+	in := []byte(`{
+		"model": "m",
+		"max_tokens": 5,
+		"system": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAA="}}],
+		"messages": [{"role": "user", "content": "hi"}]
+	}`)
+	_, _, err := translateAnthropicRequest(in)
+	var te *translateError
+	if !errors.As(err, &te) || te.status != 400 {
+		t.Fatalf("got err %v, want 400", err)
+	}
+}
+
+// Content-block ordering is significant (image before text, text before
+// image) — verify the translator preserves the order the client sent.
+func TestTranslateAnthropicRequest_ContentBlockOrderPreserved(t *testing.T) {
+	in := []byte(`{
+		"model": "m",
+		"max_tokens": 5,
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAA="}},
+				{"type": "text", "text": "what is this?"}
+			]
+		}]
+	}`)
+	out, _, err := translateAnthropicRequest(in)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var got openAIChatRequest
+	_ = json.Unmarshal(out, &got)
+	var parts []openAIContentPart
+	_ = json.Unmarshal(got.Messages[0].Content, &parts)
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want 2", len(parts))
+	}
+	if parts[0].Type != "image_url" || parts[1].Type != "text" {
+		t.Errorf("order not preserved: %+v", parts)
+	}
+}
+
+// --- Response: multi-choice and error shape ---
+
+// Only the first OpenAI choice should populate the Anthropic response;
+// subsequent choices must be dropped rather than concatenated.
+func TestTranslateOpenAIResponse_MultipleChoicesTakesFirst(t *testing.T) {
+	openAI := `{
+		"id": "c",
+		"model": "m",
+		"choices": [
+			{"index": 0, "message": {"role": "assistant", "content": "first"}, "finish_reason": "stop"},
+			{"index": 1, "message": {"role": "assistant", "content": "second"}, "finish_reason": "stop"}
+		],
+		"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+	}`
+	out, err := translateOpenAIResponse([]byte(openAI), "msg_1")
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var got anthropicMessagesResponse
+	_ = json.Unmarshal(out, &got)
+	if len(got.Content) != 1 || got.Content[0].Text != "first" {
+		t.Errorf("response should carry only first choice; got %+v", got.Content)
+	}
+	// Explicitly guard against a future "concat choices" refactor.
+	if strings.Contains(string(out), "second") {
+		t.Errorf("response leaked choice[1] text; got: %s", string(out))
+	}
+}
+
+// AnthropicError marshalling: the top-level request_id field is what clients
+// correlate with. Ensure it survives serialization.
+func TestAnthropicError_RequestIDInBody(t *testing.T) {
+	e := AnthropicError{
+		Type:      "error",
+		RequestID: "req_abc123",
+		Error: AnthropicErrorDetail{
+			Type:    AnthropicInvalidRequest,
+			Message: "oops",
+		},
+	}
+	raw, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["request_id"] != "req_abc123" {
+		t.Errorf("request_id not present in marshalled error body; got %+v", got)
+	}
+	errMap, ok := got["error"].(map[string]any)
+	if !ok || errMap["type"] != string(AnthropicInvalidRequest) {
+		t.Errorf("error.type wrong: %+v", got["error"])
+	}
+}
+
+// Empty messages array: we don't auto-reject (let the backend complain if
+// it cares). Lock in this behavior so a change is deliberate.
+func TestTranslateAnthropicRequest_EmptyMessagesAccepted(t *testing.T) {
+	in := []byte(`{
+		"model": "m",
+		"max_tokens": 5,
+		"messages": []
+	}`)
+	if _, _, err := translateAnthropicRequest(in); err != nil {
+		t.Fatalf("empty messages should translate without error; got: %v", err)
+	}
+}
+
+// count_tokens must reject tools for consistency with /v1/messages — and
+// because tool schemas contribute substantial tokens that our char-ratio
+// approximation would silently undercount, leading to context overflows.
+func TestCountAnthropicTokens_ToolsRejected(t *testing.T) {
+	in := []byte(`{
+		"model": "m",
+		"tools": [{"name": "f", "description": "d", "input_schema": {}}],
+		"messages": [{"role": "user", "content": "hi"}]
+	}`)
+	_, err := countAnthropicTokens(in)
+	var te *translateError
+	if !errors.As(err, &te) || te.status != 400 {
+		t.Fatalf("got err %v, want 400 for tools in count_tokens", err)
+	}
+}
+
+// Upstream error chunks are translated to Anthropic `event: error` frames.
+// After that, no further content or message_* frames should be emitted.
+func TestTranslateAnthropicStream_UpstreamErrorBecomesErrorEvent(t *testing.T) {
+	upstream := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}`,
+		`data: {"error":{"message":"backend exploded","type":"api_error"}}`,
+		// A spurious trailing chunk after the error must not produce output.
+		`data: {"choices":[{"index":0,"delta":{"content":"never"}}]}`,
+		`data: [DONE]`,
+		"",
+	}, "\n\n")
+
+	var buf bytes.Buffer
+	if err := translateAnthropicStream(&buf, strings.NewReader(upstream), "msg", "m"); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	events := decodeSSE(t, buf.String())
+
+	errEv := findEvent(events, "error")
+	if errEv == nil {
+		t.Fatal("expected event: error to be emitted on upstream error")
+	}
+	if !strings.Contains(errEv.data, "backend exploded") {
+		t.Errorf("error event missing upstream message; got: %s", errEv.data)
+	}
+
+	// After the error, we must not emit message_delta/message_stop — that
+	// would confuse clients about the final state.
+	for _, name := range []string{"message_delta", "message_stop"} {
+		if findEvent(events, name) != nil {
+			t.Errorf("%s must not follow an error event", name)
+		}
+	}
+	// Content from after the error chunk must not be present.
+	if strings.Contains(buf.String(), "never") {
+		t.Errorf("content after error should not be forwarded")
+	}
+}
+
+// Event ordering: content_block_start must precede the first
+// content_block_delta. The ensureStarted guard is load-bearing; a
+// regression here would break every strict SDK accumulator.
+func TestTranslateAnthropicStream_EventOrdering(t *testing.T) {
+	upstream := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"content":"A"}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"content":"B"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		"",
+	}, "\n\n")
+	var buf bytes.Buffer
+	if err := translateAnthropicStream(&buf, strings.NewReader(upstream), "msg", "m"); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	events := decodeSSE(t, buf.String())
+
+	indexOf := func(name string) int {
+		for i, e := range events {
+			if e.name == name {
+				return i
+			}
+		}
+		return -1
+	}
+	var (
+		iStart = indexOf("message_start")
+		iCBS   = indexOf("content_block_start")
+		iCBD   = indexOf("content_block_delta")
+		iCBE   = indexOf("content_block_stop")
+		iMD    = indexOf("message_delta")
+		iMS    = indexOf("message_stop")
+	)
+	if iStart < 0 || iCBS < 0 || iCBD < 0 || iCBE < 0 || iMD < 0 || iMS < 0 {
+		t.Fatalf("missing event; got order: %+v", events)
+	}
+	// Canonical Anthropic order.
+	if iStart >= iCBS || iCBS >= iCBD || iCBD >= iCBE || iCBE >= iMD || iMD >= iMS {
+		t.Errorf("out-of-order events: start=%d cbs=%d cbd=%d cbe=%d md=%d ms=%d", iStart, iCBS, iCBD, iCBE, iMD, iMS)
+	}
+}
+
+// stop_sequence must serialize as null (not omitted) on non-streaming
+// responses. We never know which sequence matched — see known limitations
+// — so emitting null is the honest, spec-compliant signal.
+func TestTranslateOpenAIResponse_StopSequenceNullPresent(t *testing.T) {
+	openAI := `{
+		"id": "c",
+		"model": "m",
+		"choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+		"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+	}`
+	out, err := translateOpenAIResponse([]byte(openAI), "msg_x")
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	// Substring check — we want the literal `"stop_sequence":null` key to
+	// be present, not omitted. A struct decode would silently hide omission.
+	if !strings.Contains(string(out), `"stop_sequence":null`) {
+		t.Errorf(`response should include "stop_sequence":null key; got %s`, string(out))
 	}
 }

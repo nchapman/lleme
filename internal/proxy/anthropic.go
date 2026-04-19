@@ -7,16 +7,36 @@ package proxy
 //
 // Scope for this pass:
 //   - Text content: full support (string or array of {type:"text", text:...}).
-//   - Image content: full support (base64 → OpenAI data URL).
+//   - Image content: full support (base64 → OpenAI data URL; accepted media
+//     types restricted to Anthropic's documented set).
 //   - Tool calling (request-level tools/tool_choice, plus tool_use and
 //     tool_result content blocks): rejected with a 400 because the two APIs
 //     disagree enough that a partial translation would silently misbehave.
 //     Will revisit when SwiftLM's tool-calling story firms up.
+//   - Non-text content blocks (document, thinking, redacted_thinking, etc.)
+//     rejected with a 400.
+//
+// Known limitations relative to Anthropic's public spec (by design for now):
+//   - message_start.usage.input_tokens is always 0 in streamed responses.
+//     OpenAI with stream_options.include_usage only reports prompt_tokens in
+//     the final chunk; backfilling message_start would require buffering the
+//     entire stream and break TTFT. Documented, tested.
+//   - stop_reason is never "stop_sequence" because OpenAI does not report
+//     which stop string matched. We map finish_reason="stop" to "end_turn".
+//   - OpenAI finish_reason="content_filter" maps to "end_turn" — Anthropic
+//     has no direct analog in the stop_reason enum.
+//   - Periodic ping events are not emitted; intermediaries that idle-close
+//     SSE connections may drop very long streams.
+//   - The anthropic-version request header is not enforced (local proxy).
+//   - Forward-compat: unknown top-level fields (service_tier, container,
+//     thinking, output_config, etc.) and cache_control hints on supported
+//     blocks are silently ignored rather than rejected.
 
 import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -133,12 +153,23 @@ type openAIUsage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// openAIStreamChunk is a single SSE event body from /v1/chat/completions
+// openAIStreamChunk is a single SSE event body from /v1/chat/completions.
+// `Error` is present when a backend interrupts a stream with an error
+// payload (OpenAI convention: `{"error": {"message": "...", "type": "..."}}`).
+// Anthropic's equivalent is an `event: error` SSE event, which translateAnthropicStream
+// emits on demand.
 type openAIStreamChunk struct {
 	ID      string               `json:"id"`
 	Model   string               `json:"model"`
 	Choices []openAIStreamChoice `json:"choices"`
 	Usage   *openAIUsage         `json:"usage,omitempty"`
+	Error   *openAIStreamError   `json:"error,omitempty"`
+}
+
+type openAIStreamError struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Code    string `json:"code,omitempty"`
 }
 
 type openAIStreamChoice struct {
@@ -418,7 +449,6 @@ type streamState struct {
 	flush            func()
 	messageID, model string
 	started          bool // emitted message_start + content_block_start
-	promptTokens     int
 	completionTokens int
 	stopReason       string
 }
@@ -464,16 +494,45 @@ func (s *streamState) ensureStarted() error {
 	if err != nil {
 		return err
 	}
+	// Anthropic's documented content_block_start carries a text block with
+	// an empty string. SDKs (notably the Python/TS accumulators) construct a
+	// TextBlock from this event and expect `text` to be present.
 	return s.writeEvent("content_block_start", map[string]any{
 		"type":          "content_block_start",
 		"index":         0,
-		"content_block": map[string]string{"type": "text"},
+		"content_block": map[string]string{"type": "text", "text": ""},
 	})
 }
 
+// errStreamAborted signals translateAnthropicStream that the upstream
+// reported an error mid-stream and an Anthropic error event has already
+// been emitted; the stream loop should stop cleanly.
+var errStreamAborted = fmt.Errorf("stream aborted by upstream error")
+
 func (s *streamState) applyChunk(chunk *openAIStreamChunk) error {
+	// Upstream signaled an error mid-stream. Translate to Anthropic's
+	// `event: error` and stop — further chunks would be semantically
+	// meaningless after an error.
+	if chunk.Error != nil {
+		errType := chunk.Error.Type
+		if errType == "" {
+			errType = string(AnthropicAPIError)
+		}
+		if err := s.writeEvent("error", map[string]any{
+			"type": "error",
+			"error": map[string]string{
+				"type":    errType,
+				"message": chunk.Error.Message,
+			},
+		}); err != nil {
+			return err
+		}
+		return errStreamAborted
+	}
 	if chunk.Usage != nil {
-		s.promptTokens = chunk.Usage.PromptTokens
+		// Only completion/output tokens are forwarded — message_delta.usage
+		// per spec is output-only (cumulative). prompt_tokens is known too
+		// late to backfill message_start, which is a documented limitation.
 		s.completionTokens = chunk.Usage.CompletionTokens
 	}
 	for _, c := range chunk.Choices {
@@ -512,6 +571,10 @@ func (s *streamState) finalize() error {
 	if stopReason == "" {
 		stopReason = "end_turn"
 	}
+	// Per Anthropic's spec, message_delta.usage is the cumulative running
+	// total and carries only output_tokens; input_tokens belongs in
+	// message_start.message.usage (which is zero today — see known
+	// limitations in the package comment).
 	if err := s.writeEvent("message_delta", map[string]any{
 		"type": "message_delta",
 		"delta": map[string]any{
@@ -519,7 +582,6 @@ func (s *streamState) finalize() error {
 			"stop_sequence": nil,
 		},
 		"usage": map[string]int{
-			"input_tokens":  s.promptTokens,
 			"output_tokens": s.completionTokens,
 		},
 	}); err != nil {
@@ -554,6 +616,12 @@ func translateAnthropicStream(w io.Writer, upstream io.Reader, messageID, model 
 			continue
 		}
 		if err := state.applyChunk(&chunk); err != nil {
+			if errors.Is(err, errStreamAborted) {
+				// Error event already emitted; don't tack on trailing
+				// message_delta/message_stop frames that would confuse
+				// the client about the final state.
+				return nil
+			}
 			return err
 		}
 	}
@@ -575,6 +643,13 @@ func countAnthropicTokens(body []byte) (int, error) {
 	var req anthropicMessagesRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return 0, newBadRequest("Failed to parse request body as JSON")
+	}
+
+	// Reject tool/tool_choice for the same reason /v1/messages does —
+	// and because tool schemas contribute meaningful token counts that
+	// our char-ratio approximation would silently undercount.
+	if rawJSONPresent(req.Tools) || rawJSONPresent(req.ToolChoice) {
+		return 0, newBadRequest("tools/tool_choice are not yet supported in /v1/messages/count_tokens")
 	}
 
 	var total int
