@@ -59,6 +59,17 @@ Examples:
 			ui.Fatal("Failed to list files: %v", err)
 		}
 
+		switch hf.DetectFormat(files) {
+		case hf.BackendMLX:
+			pullMLX(client, user, repo, quant)
+			return
+		case "":
+			ui.PrintError("No supported model files found")
+			fmt.Printf("\nThe repository '%s/%s' does not contain GGUF files or MLX weights.\n", user, repo)
+			ui.ExitFunc(1)
+			return
+		}
+
 		quants := hf.ExtractQuantizations(files)
 		if len(quants) == 0 {
 			ui.PrintError("No GGUF files found")
@@ -121,6 +132,27 @@ Examples:
 			fmt.Printf("Pulled %s\n", modelName)
 		}
 	},
+}
+
+// pullMLX handles the MLX branch: quant is inferred from the repo name when
+// not supplied, the entire repo is downloaded into a per-quant directory,
+// and metadata.yaml is updated with backend=mlx.
+func pullMLX(client *hf.Client, user, repo, quant string) {
+	if quant == "" {
+		quant = hf.MLXQuantFromRepo(repo)
+	}
+
+	modelName := ui.Keyword(hf.FormatModelName(user, repo, quant))
+	fmt.Printf("Pulling %s (MLX)\n", modelName)
+
+	result, err := hf.PullMLXModelWithProgress(client, user, repo, quant, newProgressBar)
+	if err != nil {
+		ui.Fatal("%v", err)
+	}
+
+	fmt.Printf("Pulled %s (%s)\n",
+		hf.FormatModelName(user, repo, quant),
+		ui.FormatBytes(result.TotalSize))
 }
 
 // pullModelWithProgress wraps hf.PullModel with progress bar display.
