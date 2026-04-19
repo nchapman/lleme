@@ -33,8 +33,10 @@ package proxy
 //     OpenAI with stream_options.include_usage only reports prompt_tokens in
 //     the final chunk; backfilling message_start would require buffering the
 //     entire stream and break TTFT.
-//   - Periodic ping events are not emitted; intermediaries that idle-close
-//     SSE connections may drop very long streams.
+//   - Periodic `event: ping` frames are emitted every streamPingInterval
+//     (default 15s) while a stream is open, so middleware (nginx defaults
+//     to a 60s idle-kill; corporate TLS terminators vary) doesn't drop
+//     slow-token generation mid-response.
 //   - cache_creation_input_tokens / cache_read_input_tokens are not emitted.
 //     Requires backend-side prompt-cache tracking we don't currently have.
 //   - count_tokens is a char-ratio approximation, not a real tokenize call.
@@ -53,6 +55,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
+	"time"
 )
 
 // --- Anthropic request/response types ---
@@ -887,6 +891,10 @@ func mapFinishReason(r string) string {
 // the first text delta. openToolBlocks tracks which OpenAI tool indices
 // have already emitted content_block_start so we don't repeat it.
 type streamState struct {
+	// writeMu serializes every SSE write because a parallel ping goroutine
+	// may interleave with the main chunk-processing loop. Nothing else on
+	// streamState is shared across goroutines.
+	writeMu          sync.Mutex
 	w                io.Writer
 	flush            func()
 	messageID, model string
@@ -925,6 +933,8 @@ func (s *streamState) writeEvent(event string, data any) error {
 	if err != nil {
 		return err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if _, err := fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, b); err != nil {
 		return err
 	}
@@ -1013,6 +1023,50 @@ func (s *streamState) ensureToolBlock(openAIIdx int, toolID, toolName string) (i
 // reported an error mid-stream and an Anthropic error event has already
 // been emitted; the stream loop should stop cleanly.
 var errStreamAborted = fmt.Errorf("stream aborted by upstream error")
+
+// startPings runs a goroutine that emits an `event: ping` frame every
+// `interval` until the returned stop function is called. Pings are
+// content-free — their only purpose is to keep idle-sensitive
+// intermediaries from dropping the connection. writeEvent serializes with
+// the main loop via writeMu so frames never interleave mid-JSON.
+//
+// startPings only fires the ticker after message_start has been written;
+// emitting a ping before any other frame would be out-of-sequence per
+// Anthropic's stream grammar. Returns a no-op stop when interval<=0 so
+// tests can disable pings without a special path.
+func (s *streamState) startPings(interval time.Duration) func() {
+	if interval <= 0 {
+		return func() {}
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				s.writeMu.Lock()
+				started := s.started
+				s.writeMu.Unlock()
+				if !started {
+					continue
+				}
+				// Ignore write errors: a broken connection is caught by
+				// the main loop's next write too; emitting a best-effort
+				// ping keeps the design simple.
+				_ = s.writeEvent("ping", map[string]string{"type": "ping"})
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
+}
 
 // emitError writes a synthetic Anthropic `event: error` frame. Used for
 // conditions the upstream didn't report as a structured error but that we
@@ -1181,8 +1235,21 @@ func (s *streamState) finalize() error {
 // allocation, bounded only by Go's memory, and any I/O error that happens
 // mid-stream gets surfaced as a synthetic Anthropic error event instead of
 // a silent truncation.
+// streamPingInterval is how often we emit an Anthropic `event: ping` while
+// waiting on a slow model. Many L7 proxies (nginx default 60s, corporate
+// SSL terminators) kill idle SSE connections — without pings, a 70B model
+// generating at a few tok/s can produce back-to-back chunks separated by
+// enough idle time to trip the timeout. 15s is well below every common
+// threshold we've seen.
+// streamPingInterval is how often we emit an Anthropic `event: ping`
+// while waiting on a slow model. var rather than const so tests can
+// override it without sleeping for 15 seconds.
+var streamPingInterval = 15 * time.Second
+
 func translateAnthropicStream(w io.Writer, upstream io.Reader, messageID, model string) error {
 	state := newStreamState(w, messageID, model)
+	stopPings := state.startPings(streamPingInterval)
+	defer stopPings()
 	reader := bufio.NewReader(upstream)
 
 	for {

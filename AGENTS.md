@@ -29,12 +29,12 @@ CLI/API → Proxy (port 11313) → Routes by model name → backend servers (:49
 ```
 
 Key packages in `internal/proxy/`:
-- `server.go` - HTTP routing, reverse-proxy to backends, `/v1/chat/completions` pass-through
-- `anthropic.go` - In-proxy translation of `/v1/messages` ⇄ `/v1/chat/completions` so backends only need an OpenAI surface
-- `manager.go` - Model lifecycle (start/stop backend, LRU eviction, max 3 models)
-- `backend.go` - `Runtime` interface: `Kind`, `HFAppName`, `BinaryPath`, `WorkingDir`, `BuildArgs`, `HealthURL`, `IsStartupError`
+- `server.go` - HTTP routing, reverse-proxy to backends, `/v1/chat/completions` pass-through, shared body/model helpers (`readOpenAIBody`/`readAnthropicBody`)
+- `anthropic.go` - In-proxy translation of `/v1/messages` ⇄ `/v1/chat/completions` so backends only need an OpenAI surface. Covers tool-use (request + response + streaming), stop-sequence forwarding, image base64 (URL-source refused with 401 since backends don't fetch), error-type normalization, periodic `event: ping` frames (15s default) to survive nginx-style idle timeouts
+- `manager.go` - Model lifecycle (start/stop backend, LRU eviction, max 3 models). `optionsChanged` delegates to `Runtime.SignificantOptions()` so reload-worthy key sets are a per-backend concern
+- `backend.go` - `Runtime` interface: `Kind`, `HFAppName`, `BinaryPath`, `WorkingDir`, `BuildArgs`, `HealthURL`, `IsStartupError`, `SignificantOptions`
 - `backend_llama.go`, `backend_swiftlm.go` - Concrete runtimes
-- `backend_select.go` - Reads `metadata.yaml` backend kind → picks the runtime
+- `backend_select.go` - Reads `metadata.yaml` backend kind → picks the runtime (fails closed on unknown kinds via `hf.parseBackendKind`)
 - `registry.go` - `AllRuntimes` / `HFAppNames` (single registration point for a new backend)
 - `idle.go` - Background monitor for auto-unloading idle models
 - `ports.go` - Dynamic port allocation for backends
@@ -43,7 +43,9 @@ Key packages in `internal/proxy/`:
 
 Each backend is a `Runtime` that owns its binary, args, health probe, and error log scan. Adding a new backend means (1) implement `Runtime`, (2) add its constructor to `AllRuntimes()` in `registry.go`, (3) add a `case` in `selectRuntime` for its `metadata.yaml` kind, (4) optionally a config section under a new YAML key to mirror `llamacpp:` / `swiftlm:`. Nothing in `cmd/` or the discovery surface hardcodes a backend list — `cmd/search.go` joins every registered `HFAppName` for the `?apps=` filter.
 
-**Security-sensitive install code is shared**: `internal/binaryrelease/` owns URL host/scheme allow-lists, download size caps, atomic symlink swap (`swiftlm-current` / `llama-current`), and a validating tar extractor (no path traversal, no escaping symlinks). Each backend installer (`internal/llama/binary.go`, `internal/swiftlm/binary.go`) wraps these primitives with its own repo URL, platform matrix, and `version.json` sibling file.
+**Security-sensitive install code is shared**: `internal/binaryrelease/` owns URL host/scheme allow-lists, download size caps, atomic symlink swap (`swiftlm-current` / `llama-current`), and a validating tar extractor (no path traversal, no escaping symlinks). `binaryrelease.SafeJoin` is also used by `internal/hf/mlx.go` to guard against malicious HuggingFace tree entries writing outside the model directory. Each backend installer (`internal/llama/binary.go`, `internal/swiftlm/binary.go`) wraps these primitives with its own repo URL, platform matrix, and `version.json` sibling file.
+
+HuggingFace downloads enforce their own redirect allow-list (`hfAllowedHosts` in `internal/hf/client.go` — huggingface.co + the LFS / xethub CDN hosts) and a per-file size cap derived from the manifest-declared size (2× tolerance). A compromised HF response can't redirect the Authorization-bearing download off-domain, and a server lying about Content-Length can't exhaust the disk.
 
 MLX is **macOS/arm64 only**; `swiftlm.IsSupported()` gates both install and pull. On unsupported platforms, pulling an MLX repo exits with a clear message.
 

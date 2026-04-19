@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestTranslateAnthropicRequest_StringContent(t *testing.T) {
@@ -968,13 +971,98 @@ func TestTranslateAnthropicStream_MessageStartUsageZero(t *testing.T) {
 	if payload.Message.Usage.InputTokens == nil {
 		t.Fatal("message_start.usage.input_tokens missing; spec requires the key present")
 	}
+	if payload.Message.Usage.OutputTokens == nil {
+		t.Fatal("message_start.usage.output_tokens missing; spec requires the key present")
+	}
 	// Currently 0 by design (see package-level known limitations). If a
-	// buffering strategy lands, this assertion is the signal to update the
-	// docs and the test together — it's the whole point of the lock-in.
+	// buffering strategy lands, these assertions are the signal to update
+	// the docs and the tests together — it's the whole point of the lock-in.
 	if *payload.Message.Usage.InputTokens != 0 {
 		t.Errorf("message_start.usage.input_tokens = %d; documented as 0 — update docs + this test if buffering intentionally landed",
 			*payload.Message.Usage.InputTokens)
 	}
+	if *payload.Message.Usage.OutputTokens != 0 {
+		t.Errorf("message_start.usage.output_tokens = %d; documented as 0 at open-of-stream",
+			*payload.Message.Usage.OutputTokens)
+	}
+}
+
+// With a very short ping interval and a slow upstream, we must see at
+// least one `event: ping` between content_block_delta frames. Tests the
+// nginx-idle-kill mitigation: without pings a 60s+ inter-token gap would
+// break the stream at the middleware layer.
+func TestTranslateAnthropicStream_PingsWhileIdle(t *testing.T) {
+	orig := streamPingInterval
+	streamPingInterval = 10 * time.Millisecond
+	defer func() { streamPingInterval = orig }()
+
+	// slowReader drip-feeds two content deltas with a 100ms gap between
+	// them. The ping ticker (10ms) should fire several times during the
+	// gap.
+	upstream := &slowReader{
+		chunks: []string{
+			"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"}}]}\n\n",
+			"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"b\"}}]}\n\n",
+			"data: [DONE]\n\n",
+		},
+		gap: 100 * time.Millisecond,
+	}
+	var buf safeBuffer
+	if err := translateAnthropicStream(&buf, upstream, "msg", "m"); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+
+	events := decodeSSE(t, buf.String())
+	var pings int
+	for _, ev := range events {
+		if ev.name == "ping" {
+			pings++
+		}
+	}
+	if pings == 0 {
+		t.Errorf("no ping events emitted over %d-chunk slow stream:\n%s", len(upstream.chunks), buf.String())
+	}
+}
+
+// safeBuffer synchronizes writes so the translator's concurrent ping
+// goroutine and main loop don't race on a bytes.Buffer.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// slowReader emits one chunk per Read call, sleeping `gap` between chunks
+// so the translator's ping ticker has time to fire. Unlike a bytes.Reader
+// that empties synchronously, this keeps the stream "live" long enough to
+// exercise the idle-ping path.
+type slowReader struct {
+	chunks []string
+	gap    time.Duration
+	i      int
+}
+
+func (r *slowReader) Read(p []byte) (int, error) {
+	if r.i >= len(r.chunks) {
+		return 0, io.EOF
+	}
+	if r.i > 0 {
+		time.Sleep(r.gap)
+	}
+	n := copy(p, r.chunks[r.i])
+	r.i++
+	return n, nil
 }
 
 // An upstream chunk that carries both `content` and `finish_reason` on the
