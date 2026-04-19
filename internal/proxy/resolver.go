@@ -44,6 +44,9 @@ func (r *ModelResolver) ListDownloadedModels() ([]DownloadedModel, error) {
 		if d.IsDir() || filepath.Ext(d.Name()) != ".gguf" {
 			return nil
 		}
+		if hf.IsMMProjFileName(d.Name()) {
+			return nil
+		}
 
 		relPath, err := filepath.Rel(r.modelsPath, path)
 		if err != nil {

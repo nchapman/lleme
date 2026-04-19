@@ -350,3 +350,26 @@ func TestCleanupPartialFilesEmptyDirs(t *testing.T) {
 		t.Errorf("CleanupPartialFiles() count = %d, want 0", count)
 	}
 }
+
+func TestIsMMProjFileName(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"Q4_K_M-mmproj.gguf", true},
+		{"UD-Q4_K_XL-mmproj.gguf", true},
+		{"Q4_K_M-MMPROJ.gguf", true}, // case-insensitive
+		{"Q4_K_M.gguf", false},
+		{"UD-Q4_K_XL.gguf", false},
+		{"mmproj-BF16.gguf", false}, // prefix form, not written by lleme
+		{"mmproj.gguf", false},
+		{"Q4_K_M-mmproj.bin", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsMMProjFileName(tt.name); got != tt.want {
+				t.Errorf("IsMMProjFileName(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}

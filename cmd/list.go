@@ -39,6 +39,9 @@ var listCmd = &cobra.Command{
 			if filepath.Ext(d.Name()) != ".gguf" {
 				return nil
 			}
+			if hf.IsMMProjFileName(d.Name()) {
+				return nil
+			}
 
 			relPath, err := filepath.Rel(modelsDir, path)
 			if err != nil {

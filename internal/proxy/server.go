@@ -14,11 +14,13 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/nchapman/lleme/internal/config"
+	"github.com/nchapman/lleme/internal/hf"
 	"github.com/nchapman/lleme/internal/logs"
 	"github.com/nchapman/lleme/internal/version"
 )
@@ -372,55 +374,78 @@ func (s *Server) handleAnthropicModelError(w http.ResponseWriter, requestID stri
 	}
 }
 
-// handleModels returns the list of loaded models
+// handleModels returns all downloaded models sorted by most recently used first.
+// Loaded backends use their live LastActivity; unloaded models use the persisted
+// last-used metadata, falling back to the GGUF file's mtime.
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only GET is allowed")
 		return
 	}
 
-	backends := s.manager.ListBackends()
+	type modelEntry struct {
+		info     OpenAIModelInfo
+		lastUsed time.Time
+	}
 
-	var models []OpenAIModelInfo
-	for _, b := range backends {
-		models = append(models, OpenAIModelInfo{
-			ID:      b.ModelName,
-			Object:  "model",
-			Created: b.StartedAt.Unix(),
-			OwnedBy: "local",
-			Lleme: &LlemeStatus{
-				Status:       b.Status,
-				Port:         b.Port,
-				LastActivity: b.LastActivity,
-				LoadedAt:     b.StartedAt,
+	var entries []modelEntry
+	loadedSet := make(map[string]bool)
+
+	for _, b := range s.manager.ListBackends() {
+		loadedSet[b.ModelName] = true
+		entries = append(entries, modelEntry{
+			info: OpenAIModelInfo{
+				ID:      b.ModelName,
+				Object:  "model",
+				Created: b.StartedAt.Unix(),
+				OwnedBy: "local",
+				Lleme: &LlemeStatus{
+					Status:       b.Status,
+					Port:         b.Port,
+					LastActivity: b.LastActivity,
+					LoadedAt:     b.StartedAt,
+				},
 			},
+			lastUsed: b.LastActivity,
 		})
 	}
 
-	// Also include downloaded but not loaded models
-	downloaded, _ := s.manager.Resolver().ListDownloadedModels()
-	loadedSet := make(map[string]bool)
-	for _, b := range backends {
-		loadedSet[b.ModelName] = true
+	downloaded, err := s.manager.Resolver().ListDownloadedModels()
+	if err != nil {
+		logs.Warn("Failed to enumerate downloaded models", "error", err)
 	}
 	for _, d := range downloaded {
-		if !loadedSet[d.FullName] {
-			models = append(models, OpenAIModelInfo{
+		if loadedSet[d.FullName] {
+			continue
+		}
+		lastUsed := hf.GetLastUsed(d.User, d.Repo, d.Quant)
+		if lastUsed.IsZero() {
+			if fi, err := os.Stat(d.ModelPath); err == nil {
+				lastUsed = fi.ModTime()
+			}
+		}
+		entries = append(entries, modelEntry{
+			info: OpenAIModelInfo{
 				ID:      d.FullName,
 				Object:  "model",
 				Created: 0,
 				OwnedBy: "local",
-			})
-		}
+			},
+			lastUsed: lastUsed,
+		})
 	}
 
-	resp := OpenAIModelsResponse{
-		Object: "list",
-		Data:   models,
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].lastUsed.After(entries[j].lastUsed)
+	})
+
+	models := make([]OpenAIModelInfo, len(entries))
+	for i, e := range entries {
+		models[i] = e.info
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	writeJSON(w, resp)
+	writeJSON(w, OpenAIModelsResponse{Object: "list", Data: models})
 }
 
 // handleHealth returns basic health status
