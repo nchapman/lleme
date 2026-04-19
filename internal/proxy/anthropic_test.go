@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -128,20 +129,58 @@ func TestTranslateAnthropicRequest_SystemArrayFlattened(t *testing.T) {
 	}
 }
 
-func TestTranslateAnthropicRequest_ToolUseAssistantContentRejected(t *testing.T) {
+// Assistant tool_use blocks translate to an OpenAI assistant message with
+// tool_calls — Anthropic's {id, name, input} maps 1:1 to OpenAI's
+// {id, type:"function", function:{name, arguments}}.
+func TestTranslateAnthropicRequest_AssistantToolUseTranslated(t *testing.T) {
 	in := []byte(`{
 		"model": "m",
 		"max_tokens": 10,
 		"messages": [{
 			"role": "assistant",
-			"content": [{"type": "tool_use", "id": "t1", "name": "f", "input": {}}]
+			"content": [
+				{"type": "text", "text": "thinking..."},
+				{"type": "tool_use", "id": "t1", "name": "fetch", "input": {"url": "https://x"}}
+			]
 		}]
 	}`)
 
-	_, _, err := translateAnthropicRequest(in)
-	var te *translateError
-	if !errors.As(err, &te) || te.status != 400 {
-		t.Fatalf("got err %v, want 400 translateError", err)
+	out, _, err := translateAnthropicRequest(in)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var got struct {
+		Messages []struct {
+			Role      string `json:"role"`
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name, Arguments string
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(got.Messages))
+	}
+	m := got.Messages[0]
+	if m.Role != "assistant" || m.Content != "thinking..." {
+		t.Errorf("role/content: %q %q", m.Role, m.Content)
+	}
+	if len(m.ToolCalls) != 1 {
+		t.Fatalf("tool_calls = %d, want 1", len(m.ToolCalls))
+	}
+	tc := m.ToolCalls[0]
+	if tc.ID != "t1" || tc.Type != "function" || tc.Function.Name != "fetch" {
+		t.Errorf("tool call shape: %+v", tc)
+	}
+	if !strings.Contains(tc.Function.Arguments, `"url"`) {
+		t.Errorf("arguments lost input: %q", tc.Function.Arguments)
 	}
 }
 
@@ -262,38 +301,165 @@ func TestTranslateAnthropicRequest_ContentBlocksTextAndImage(t *testing.T) {
 	}
 }
 
-func TestTranslateAnthropicRequest_ToolsRejected(t *testing.T) {
+// Tools are translated into OpenAI's tools schema: Anthropic's
+// {name, description, input_schema} becomes {type:"function", function:
+// {name, description, parameters}}. Clients like Claude Code / aider
+// / cline rely on this; without it they can't use the proxy at all.
+func TestTranslateAnthropicRequest_ToolsTranslated(t *testing.T) {
 	in := []byte(`{
 		"model": "m",
 		"max_tokens": 10,
-		"tools": [{"name": "get_weather"}],
+		"tools": [{
+			"name": "get_weather",
+			"description": "Return the weather",
+			"input_schema": {"type": "object", "properties": {"loc": {"type": "string"}}}
+		}],
 		"messages": [{"role": "user", "content": "hi"}]
 	}`)
-
-	_, _, err := translateAnthropicRequest(in)
-	var te *translateError
-	if !errors.As(err, &te) || te.status != 400 {
-		t.Fatalf("got err %v, want 400 translateError", err)
+	out, _, err := translateAnthropicRequest(in)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
 	}
-	if !strings.Contains(te.msg, "tools") {
-		t.Errorf("error message = %q, should mention tools", te.msg)
+	var got struct {
+		Tools []struct {
+			Type     string `json:"type"`
+			Function struct {
+				Name, Description string
+				Parameters        map[string]any
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("tools = %d, want 1", len(got.Tools))
+	}
+	tool := got.Tools[0]
+	if tool.Type != "function" || tool.Function.Name != "get_weather" {
+		t.Errorf("tool shape: %+v", tool)
+	}
+	if tool.Function.Description == "" {
+		t.Errorf("description dropped")
+	}
+	if tool.Function.Parameters["type"] != "object" {
+		t.Errorf("parameters lost: %+v", tool.Function.Parameters)
 	}
 }
 
-func TestTranslateAnthropicRequest_ToolResultContentRejected(t *testing.T) {
-	in := []byte(`{
-		"model": "m",
-		"max_tokens": 10,
-		"messages": [{
-			"role": "user",
-			"content": [{"type": "tool_result", "tool_use_id": "x", "content": "42"}]
-		}]
-	}`)
+// Each tool_choice shape must land on the correct OpenAI form so the
+// backend sees the same intent. Pins the 1:1 mapping — a client sending
+// {type:"any"} expects forced tool use and we must translate to "required",
+// not drop it.
+func TestTranslateAnthropicRequest_ToolChoiceShapes(t *testing.T) {
+	base := func(tc string) []byte {
+		return []byte(`{
+			"model": "m", "max_tokens": 10,
+			"tools": [{"name": "f", "input_schema": {}}],
+			"tool_choice": ` + tc + `,
+			"messages": [{"role": "user", "content": "hi"}]
+		}`)
+	}
+	// Compared after re-parsing so map key order doesn't matter.
+	decode := func(raw string) any {
+		var v any
+		if err := json.Unmarshal([]byte(raw), &v); err != nil {
+			t.Fatalf("decode %s: %v", raw, err)
+		}
+		return v
+	}
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"string auto", `"auto"`, `"auto"`},
+		{"object auto", `{"type":"auto"}`, `"auto"`},
+		{"object any -> required", `{"type":"any"}`, `"required"`},
+		{"object none", `{"type":"none"}`, `"none"`},
+		{"object tool with name", `{"type":"tool","name":"f"}`, `{"type":"function","function":{"name":"f"}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, _, err := translateAnthropicRequest(base(tc.in))
+			if err != nil {
+				t.Fatalf("translate: %v", err)
+			}
+			var got struct {
+				ToolChoice json.RawMessage `json:"tool_choice"`
+			}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(decode(string(got.ToolChoice)), decode(tc.want)) {
+				t.Errorf("tool_choice = %s, want %s", got.ToolChoice, tc.want)
+			}
+		})
+	}
+}
 
-	_, _, err := translateAnthropicRequest(in)
-	var te *translateError
-	if !errors.As(err, &te) || te.status != 400 {
-		t.Fatalf("got err %v, want 400 translateError", err)
+// Empty tools/tool_choice are treated as absent — a client attaching
+// `tools: []` unconditionally (common Go/Python SDK wrapper pattern) must
+// not be rejected or forced into tool mode.
+func TestTranslateAnthropicRequest_EmptyToolsAreAbsent(t *testing.T) {
+	in := []byte(`{
+		"model": "m", "max_tokens": 10,
+		"tools": [], "tool_choice": {},
+		"messages": [{"role": "user", "content": "hi"}]
+	}`)
+	out, _, err := translateAnthropicRequest(in)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if bytes.Contains(out, []byte(`"tools"`)) {
+		t.Error("empty tools should not appear in translated request")
+	}
+	if bytes.Contains(out, []byte(`"tool_choice"`)) {
+		t.Error("empty tool_choice should not appear in translated request")
+	}
+}
+
+// tool_result content blocks translate to role:"tool" OpenAI messages;
+// this is the end-half of the Claude Code tool loop. Multiple tool_result
+// blocks in one user turn fan out to one OpenAI message each.
+func TestTranslateAnthropicRequest_ToolResultTranslated(t *testing.T) {
+	in := []byte(`{
+		"model": "m", "max_tokens": 10,
+		"messages": [
+			{"role": "assistant", "content": [
+				{"type": "tool_use", "id": "a", "name": "f", "input": {}}
+			]},
+			{"role": "user", "content": [
+				{"type": "tool_result", "tool_use_id": "a", "content": "42"},
+				{"type": "text", "text": "one more thing"}
+			]}
+		]
+	}`)
+	out, _, err := translateAnthropicRequest(in)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var got struct {
+		Messages []struct {
+			Role       string          `json:"role"`
+			Content    json.RawMessage `json:"content"`
+			ToolCallID string          `json:"tool_call_id"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(got.Messages) != 3 {
+		t.Fatalf("messages = %d, want 3 (assistant + tool + user)", len(got.Messages))
+	}
+	if got.Messages[1].Role != "tool" || got.Messages[1].ToolCallID != "a" {
+		t.Errorf("second message: role=%s id=%s, want tool/a", got.Messages[1].Role, got.Messages[1].ToolCallID)
+	}
+	if !bytes.Contains(got.Messages[1].Content, []byte("42")) {
+		t.Errorf("tool content missing: %s", got.Messages[1].Content)
+	}
+	if got.Messages[2].Role != "user" {
+		t.Errorf("third message: role=%s, want user", got.Messages[2].Role)
 	}
 }
 
@@ -411,6 +577,196 @@ func TestTranslateAnthropicStream_EmptyUpstreamStillEmitsFrame(t *testing.T) {
 	}
 }
 
+// When llama-server reports a stopping_word on a finish_reason=="stop",
+// translate to Anthropic's stop_reason="stop_sequence" with the matched
+// string carried on stop_sequence. Without this, clients that branch on
+// "stop_sequence" (e.g. aider-style multi-model agents) never see the
+// signal.
+func TestTranslateOpenAIResponse_StopSequenceForwarded(t *testing.T) {
+	openAI := `{
+		"model": "m",
+		"choices": [{
+			"index": 0,
+			"message": {"role": "assistant", "content": "stop here"},
+			"finish_reason": "stop",
+			"stopping_word": "\nHuman:"
+		}],
+		"usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+	}`
+	out, err := translateOpenAIResponse([]byte(openAI), "msg_abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got anthropicMessagesResponse
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.StopReason != "stop_sequence" {
+		t.Errorf("stop_reason = %q, want stop_sequence", got.StopReason)
+	}
+	if got.StopSequence == nil || *got.StopSequence != "\nHuman:" {
+		t.Errorf("stop_sequence = %v, want \\nHuman:", got.StopSequence)
+	}
+}
+
+// An OpenAI response with finish_reason="tool_calls" must produce an
+// Anthropic response whose content includes tool_use blocks and whose
+// stop_reason is "tool_use" — the contract Claude Code's tool loop walks.
+func TestTranslateOpenAIResponse_ToolCalls(t *testing.T) {
+	openAI := `{
+		"model": "m",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": "",
+				"tool_calls": [{
+					"id": "call_1",
+					"type": "function",
+					"function": {"name": "fetch", "arguments": "{\"url\":\"https://x\"}"}
+				}]
+			},
+			"finish_reason": "tool_calls"
+		}],
+		"usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18}
+	}`
+	out, err := translateOpenAIResponse([]byte(openAI), "msg_abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got anthropicMessagesResponse
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.StopReason != "tool_use" {
+		t.Errorf("stop_reason = %q, want tool_use", got.StopReason)
+	}
+	if len(got.Content) != 1 || got.Content[0].Type != "tool_use" {
+		t.Fatalf("content shape: %+v", got.Content)
+	}
+	if got.Content[0].ID != "call_1" || got.Content[0].Name != "fetch" {
+		t.Errorf("tool_use fields: %+v", got.Content[0])
+	}
+	var input map[string]any
+	if err := json.Unmarshal(got.Content[0].Input, &input); err != nil {
+		t.Fatalf("input parse: %v", err)
+	}
+	if input["url"] != "https://x" {
+		t.Errorf("input lost arguments: %+v", input)
+	}
+}
+
+// Streaming: tool_call deltas must produce content_block_start with
+// content_block.type="tool_use" and input_json_delta partial_json events
+// that SDK accumulators stitch back into a JSON argument object.
+func TestTranslateAnthropicStream_ToolCallDeltas(t *testing.T) {
+	upstream := strings.Join([]string{
+		// First chunk introduces the tool call (id + name)
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"fetch","arguments":""}}]}}]}`,
+		// Args arrive in two fragments
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"url\":"}}]}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"https://x\"}"}}]}}]}`,
+		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+		"",
+	}, "\n\n")
+	var buf bytes.Buffer
+	if err := translateAnthropicStream(&buf, strings.NewReader(upstream), "msg", "m"); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	events := decodeSSE(t, buf.String())
+
+	// message_start present, tool_use block_start present, at least two
+	// input_json_delta events, one block_stop, stop_reason tool_use.
+	var blockStartFound, blockStopFound bool
+	var partialJSON []string
+	var stopReason string
+	for _, ev := range events {
+		switch ev.name {
+		case "content_block_start":
+			if strings.Contains(ev.data, `"type":"tool_use"`) {
+				blockStartFound = true
+				if !strings.Contains(ev.data, `"id":"call_1"`) {
+					t.Errorf("tool block_start missing id: %s", ev.data)
+				}
+				if !strings.Contains(ev.data, `"name":"fetch"`) {
+					t.Errorf("tool block_start missing name: %s", ev.data)
+				}
+			}
+		case "content_block_delta":
+			if strings.Contains(ev.data, `"type":"input_json_delta"`) {
+				var payload struct {
+					Delta struct {
+						Partial string `json:"partial_json"`
+					} `json:"delta"`
+				}
+				_ = json.Unmarshal([]byte(ev.data), &payload)
+				partialJSON = append(partialJSON, payload.Delta.Partial)
+			}
+		case "content_block_stop":
+			blockStopFound = true
+		case "message_delta":
+			if strings.Contains(ev.data, `"stop_reason":"tool_use"`) {
+				stopReason = "tool_use"
+			}
+		}
+	}
+	if !blockStartFound {
+		t.Error("missing tool_use content_block_start")
+	}
+	if !blockStopFound {
+		t.Error("missing content_block_stop")
+	}
+	if stopReason != "tool_use" {
+		t.Error("message_delta did not report stop_reason=tool_use")
+	}
+	if len(partialJSON) < 2 {
+		t.Errorf("expected ≥2 input_json_delta events, got %d: %v", len(partialJSON), partialJSON)
+	}
+	// The concatenated fragments must be a valid JSON object.
+	joined := strings.Join(partialJSON, "")
+	var args map[string]any
+	if err := json.Unmarshal([]byte(joined), &args); err != nil {
+		t.Errorf("concatenated partial_json not valid JSON: %v (got %q)", err, joined)
+	}
+}
+
+// Upstream error events with a non-Anthropic type must be normalized to the
+// api_error enum so SDK consumers don't see a leaked backend-specific type.
+func TestTranslateAnthropicStream_ErrorTypeNormalized(t *testing.T) {
+	upstream := `data: {"error":{"message":"boom","type":"VendorSpecificError"}}` + "\n\n"
+	var buf bytes.Buffer
+	if err := translateAnthropicStream(&buf, strings.NewReader(upstream), "msg", "m"); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	for _, ev := range decodeSSE(t, buf.String()) {
+		if ev.name != "error" {
+			continue
+		}
+		if !strings.Contains(ev.data, `"type":"api_error"`) {
+			t.Errorf("error type not normalized: %s", ev.data)
+		}
+	}
+}
+
+// generateMessageID must produce values independent of request IDs and
+// the required msg_ prefix. We call it N times and require uniqueness —
+// a regression where it derives from the request ID would collide when
+// called twice in quick succession with the same request.
+func TestGenerateMessageID(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 16; i++ {
+		id := generateMessageID()
+		if !strings.HasPrefix(id, "msg_") {
+			t.Errorf("id missing prefix: %q", id)
+		}
+		if seen[id] {
+			t.Errorf("duplicate id: %q", id)
+		}
+		seen[id] = true
+	}
+}
+
 func TestTranslateAnthropicStream_MappedFinishReason(t *testing.T) {
 	upstream := strings.Join([]string{
 		`data: {"id":"c","model":"m","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":"length"}]}`,
@@ -426,8 +782,11 @@ func TestTranslateAnthropicStream_MappedFinishReason(t *testing.T) {
 	}
 }
 
+// countAnthropicTokens is deliberately conservative (overcount). We don't
+// pin exact numbers because the estimator is tuned for planning safety, not
+// parity with a real tokenizer — instead we assert sane ranges plus the
+// invariant that additional content never decreases the count.
 func TestCountAnthropicTokens(t *testing.T) {
-	// A 7-char string should yield ceil(7/3.5) = 2 tokens.
 	body := []byte(`{
 		"model": "m",
 		"messages": [{"role": "user", "content": "abcdefg"}]
@@ -436,30 +795,33 @@ func TestCountAnthropicTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
-	if n != 2 {
-		t.Errorf("count = %d, want 2", n)
+	// 7 chars → at least 3 content tokens, plus per-message overhead.
+	// Upper bound guards against a runaway estimator.
+	if n < 3 || n > 20 {
+		t.Errorf("count = %d, want 3 ≤ n ≤ 20", n)
 	}
 }
 
-func TestCountAnthropicTokens_IncludesSystemAndBlocks(t *testing.T) {
-	body := []byte(`{
+// Adding system content and content blocks must never reduce the estimate.
+// Regression guard: the old estimator silently dropped the per-message
+// overhead, letting a longer request appear cheaper than a shorter one.
+func TestCountAnthropicTokens_MonotonicInContent(t *testing.T) {
+	small := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	big := []byte(`{
 		"model": "m",
-		"system": "abcdefg",
-		"messages": [{
-			"role": "user",
-			"content": [
+		"system": "you are helpful",
+		"messages": [
+			{"role": "user", "content": [
 				{"type": "text", "text": "hijklmn"},
 				{"type": "text", "text": "opqrstu"}
-			]
-		}]
+			]},
+			{"role": "assistant", "content": "ack"}
+		]
 	}`)
-	// 3 segments × 7 chars → ceil(7/3.5)=2 tokens each → 6 total.
-	n, err := countAnthropicTokens(body)
-	if err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if n != 6 {
-		t.Errorf("count = %d, want 6", n)
+	nSmall, _ := countAnthropicTokens(small)
+	nBig, _ := countAnthropicTokens(big)
+	if nBig <= nSmall {
+		t.Errorf("big request not larger: small=%d big=%d", nSmall, nBig)
 	}
 }
 
@@ -772,8 +1134,11 @@ func TestTranslateAnthropicRequest_DocumentBlockRejected(t *testing.T) {
 	}
 }
 
-// Extended-thinking blocks and redacted_thinking blocks are not translated.
-func TestTranslateAnthropicRequest_ThinkingBlockRejected(t *testing.T) {
+// Extended-thinking and redacted_thinking blocks are advisory; we drop
+// them from the translated request rather than reject, so an assistant
+// turn that carries them (from an earlier round with a reasoning-enabled
+// model) still gets through to backends that don't understand them.
+func TestTranslateAnthropicRequest_ThinkingBlockDropped(t *testing.T) {
 	for _, blockType := range []string{"thinking", "redacted_thinking"} {
 		t.Run(blockType, func(t *testing.T) {
 			body := []byte(`{
@@ -781,27 +1146,32 @@ func TestTranslateAnthropicRequest_ThinkingBlockRejected(t *testing.T) {
 				"max_tokens": 5,
 				"messages": [{
 					"role": "assistant",
-					"content": [{"type": "` + blockType + `", "thinking": "..."}]
+					"content": [
+						{"type": "` + blockType + `", "thinking": "secret"},
+						{"type": "text", "text": "final answer"}
+					]
 				}]
 			}`)
-			_, _, err := translateAnthropicRequest(body)
-			var te *translateError
-			if !errors.As(err, &te) || te.status != 400 {
-				t.Fatalf("got err %v, want 400", err)
+			out, _, err := translateAnthropicRequest(body)
+			if err != nil {
+				t.Fatalf("thinking block should be dropped, got err: %v", err)
 			}
-			// Make sure we fail for the right reason — not an unrelated
-			// 400 that happens to match status.
-			if !strings.Contains(te.msg, blockType) {
-				t.Errorf("error message should mention %q; got %q", blockType, te.msg)
+			// The thinking text must not leak into the backend request;
+			// only the surrounding text block remains.
+			if bytes.Contains(out, []byte("secret")) {
+				t.Errorf("thinking content leaked into translated request: %s", out)
+			}
+			if !bytes.Contains(out, []byte("final answer")) {
+				t.Errorf("surrounding text dropped: %s", out)
 			}
 		})
 	}
 }
 
-// Anthropic supports `source.type: "url"` for images (added 2024); llama.cpp
-// passes the URL through verbatim. We do the same — no download, no
-// validation; let the backend fetch.
-func TestTranslateAnthropicRequest_ImageURLSourcePassthrough(t *testing.T) {
+// Anthropic supports `source.type: "url"` for images, but llama-server and
+// SwiftLM don't fetch URLs at load time — passing one through would surface
+// as an opaque backend error. We reject with a clear actionable message.
+func TestTranslateAnthropicRequest_ImageURLSourceRejected(t *testing.T) {
 	in := []byte(`{
 		"model": "m",
 		"max_tokens": 5,
@@ -812,19 +1182,13 @@ func TestTranslateAnthropicRequest_ImageURLSourcePassthrough(t *testing.T) {
 			]
 		}]
 	}`)
-	out, _, err := translateAnthropicRequest(in)
-	if err != nil {
-		t.Fatalf("url image should be accepted, got: %v", err)
+	_, _, err := translateAnthropicRequest(in)
+	var te *translateError
+	if !errors.As(err, &te) || te.status != 400 {
+		t.Fatalf("got err %v, want 400", err)
 	}
-	var got openAIChatRequest
-	_ = json.Unmarshal(out, &got)
-	var parts []openAIContentPart
-	_ = json.Unmarshal(got.Messages[0].Content, &parts)
-	if len(parts) != 1 || parts[0].ImageURL == nil {
-		t.Fatalf("expected one image_url part; got %+v", parts)
-	}
-	if parts[0].ImageURL.URL != "https://example.com/x.png" {
-		t.Errorf("image url = %q, want passthrough", parts[0].ImageURL.URL)
+	if !strings.Contains(te.msg, "url sources") {
+		t.Errorf("error should explain the URL rejection; got %q", te.msg)
 	}
 }
 
@@ -979,19 +1343,30 @@ func TestTranslateAnthropicRequest_EmptyMessagesAccepted(t *testing.T) {
 	}
 }
 
-// count_tokens must reject tools for consistency with /v1/messages — and
-// because tool schemas contribute substantial tokens that our char-ratio
-// approximation would silently undercount, leading to context overflows.
-func TestCountAnthropicTokens_ToolsRejected(t *testing.T) {
-	in := []byte(`{
+// count_tokens estimates tool schema cost too — otherwise a client using
+// count_tokens to size its context budget will undercount a tool-heavy
+// request and trip context-window errors at inference time. Hard number
+// pinning is avoided (estimator is heuristic) in favor of an inequality.
+func TestCountAnthropicTokens_IncludesToolSchemas(t *testing.T) {
+	withTools := []byte(`{
 		"model": "m",
-		"tools": [{"name": "f", "description": "d", "input_schema": {}}],
+		"tools": [{"name": "f", "description": "do the thing", "input_schema": {"type":"object","properties":{"x":{"type":"string","description":"the x"}}}}],
 		"messages": [{"role": "user", "content": "hi"}]
 	}`)
-	_, err := countAnthropicTokens(in)
-	var te *translateError
-	if !errors.As(err, &te) || te.status != 400 {
-		t.Fatalf("got err %v, want 400 for tools in count_tokens", err)
+	withoutTools := []byte(`{
+		"model": "m",
+		"messages": [{"role": "user", "content": "hi"}]
+	}`)
+	nWith, err := countAnthropicTokens(withTools)
+	if err != nil {
+		t.Fatalf("with tools: %v", err)
+	}
+	nWithout, err := countAnthropicTokens(withoutTools)
+	if err != nil {
+		t.Fatalf("without: %v", err)
+	}
+	if nWith <= nWithout {
+		t.Errorf("tools didn't add to count: with=%d without=%d", nWith, nWithout)
 	}
 }
 

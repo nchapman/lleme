@@ -275,11 +275,11 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		if msg == "" {
 			msg = fmt.Sprintf("backend returned %d", resp.StatusCode)
 		}
-		s.writeAnthropicError(w, requestID, resp.StatusCode, AnthropicAPIError, msg)
+		s.writeAnthropicError(w, requestID, resp.StatusCode, anthropicErrorTypeForStatus(resp.StatusCode), msg)
 		return
 	}
 
-	messageID := "msg_" + strings.TrimPrefix(requestID, "req_")
+	messageID := generateMessageID()
 	if stream {
 		s.writeAnthropicStream(w, resp.Body, requestID, messageID, modelName)
 		return
@@ -496,6 +496,16 @@ func generateRequestID() string {
 	b := make([]byte, 12)
 	_, _ = rand.Read(b)
 	return "req_" + hex.EncodeToString(b)
+}
+
+// generateMessageID creates an Anthropic-style msg_<random> ID. Kept
+// independent from requestID so clients can't use one to derive the other
+// — the two live in different namespaces (request is ephemeral; message is
+// a resource identifier).
+func generateMessageID() string {
+	b := make([]byte, 12)
+	_, _ = rand.Read(b)
+	return "msg_" + hex.EncodeToString(b)
 }
 
 // writeAnthropicError writes an Anthropic-compatible error response
