@@ -196,11 +196,7 @@ func findModelsInDir(modelsDir, pattern string, olderThan time.Duration, largerT
 		if !re.MatchString(fullName) && !re.MatchString(repoName) {
 			continue
 		}
-		lastUsed := m.LastUsed
-		if t := hf.GetLastUsed(m.User, m.Repo, m.Quant); !t.IsZero() {
-			lastUsed = t
-		}
-		if olderThan > 0 && time.Since(lastUsed) < olderThan {
+		if olderThan > 0 && time.Since(m.LastUsed) < olderThan {
 			continue
 		}
 		if largerThan > 0 && m.Size < largerThan {
@@ -213,7 +209,7 @@ func findModelsInDir(modelsDir, pattern string, olderThan time.Duration, largerT
 			Backend:  m.Backend,
 			Path:     m.Path,
 			Size:     m.Size,
-			LastUsed: lastUsed,
+			LastUsed: m.LastUsed,
 		})
 	}
 	return out, nil

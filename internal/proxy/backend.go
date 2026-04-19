@@ -35,6 +35,12 @@ type Runtime interface {
 	// IsStartupError inspects the backend's log file and returns true when
 	// a fatal error indicates the process will not become ready.
 	IsStartupError(logPath string) bool
+
+	// SignificantOptions returns the option keys whose value changes require
+	// stopping and restarting the backend (rather than being harmlessly
+	// ignored or applied per-request). The manager uses this to decide
+	// whether a /api/run call with new options should reload the model.
+	SignificantOptions() []string
 }
 
 // BackendKind identifies a backend implementation.

@@ -8,6 +8,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/nchapman/lleme/internal/hf"
 	"github.com/nchapman/lleme/internal/logs"
 )
 
@@ -61,9 +62,9 @@ func (p *Preset) GetOptions(kind string) map[string]any {
 
 func (p *Preset) backendOptions(kind string) map[string]any {
 	switch kind {
-	case "gguf":
+	case hf.BackendGGUF:
 		return p.LlamaCpp.Options
-	case "mlx":
+	case hf.BackendMLX:
 		return p.SwiftLM.Options
 	}
 	return nil

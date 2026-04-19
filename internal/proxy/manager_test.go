@@ -199,13 +199,39 @@ func TestOptionsChanged(t *testing.T) {
 		},
 	}
 
+	rt := NewLlamaRuntime(nil)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := optionsChanged(tt.current, tt.new)
+			result := optionsChanged(rt, tt.current, tt.new)
 			if result != tt.expected {
 				t.Errorf("optionsChanged(%v, %v) = %v, want %v", tt.current, tt.new, result, tt.expected)
 			}
 		})
+	}
+}
+
+// Each runtime has its own reload-worthy key list. A SwiftLM-only flag
+// change must trigger a reload when the backend is SwiftLM, and NOT when
+// the backend is llama (which ignores it).
+func TestOptionsChangedPerRuntime(t *testing.T) {
+	cur := map[string]any{"turbo-kv": false}
+	next := map[string]any{"turbo-kv": true}
+
+	if !optionsChanged(NewSwiftLMRuntime(nil), cur, next) {
+		t.Error("SwiftLM: turbo-kv change should trigger a reload")
+	}
+	if optionsChanged(NewLlamaRuntime(nil), cur, next) {
+		t.Error("llama: turbo-kv is not a llama option; should not trigger a reload")
+	}
+
+	// Symmetric check: mirostat matters to llama, not SwiftLM.
+	cur = map[string]any{"flash-attn": "auto"}
+	next = map[string]any{"flash-attn": "on"}
+	if !optionsChanged(NewLlamaRuntime(nil), cur, next) {
+		t.Error("llama: flash-attn change should trigger a reload")
+	}
+	if optionsChanged(NewSwiftLMRuntime(nil), cur, next) {
+		t.Error("SwiftLM: flash-attn is not a SwiftLM option; should not trigger a reload")
 	}
 }
 

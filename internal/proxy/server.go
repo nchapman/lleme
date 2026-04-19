@@ -425,43 +425,20 @@ func (s *Server) writeAnthropicTranslationError(w http.ResponseWriter, requestID
 }
 
 // proxyToBackend handles the common logic of extracting model and proxying
+// an OpenAI-style request verbatim to the resolved backend.
 func (s *Server) proxyToBackend(w http.ResponseWriter, r *http.Request, path string) {
-	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only POST is allowed")
+	body, ok := s.readOpenAIBody(w, r)
+	if !ok {
 		return
 	}
-
-	// Cap inbound body to prevent unbounded memory use.
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			s.writeError(w, http.StatusRequestEntityTooLarge, "invalid_request",
-				fmt.Sprintf("Request body exceeds %d bytes", maxRequestBodyBytes))
-			return
-		}
-		s.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to read request body")
-		return
-	}
-	r.Body.Close()
-
-	var req struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request body")
-		return
-	}
-
-	if req.Model == "" {
-		s.writeError(w, http.StatusBadRequest, "invalid_request", "Model field is required")
+	modelName, ok := s.extractOpenAIModel(w, body)
+	if !ok {
 		return
 	}
 
 	// Get or load the backend (no options override for chat endpoint).
 	// GetOrLoadBackend reserves the backend via AcquireRequest; we release on return.
-	backend, err := s.manager.GetOrLoadBackend(req.Model, nil)
+	backend, err := s.manager.GetOrLoadBackend(modelName, nil)
 	if err != nil {
 		s.handleModelError(w, err)
 		return
@@ -489,6 +466,47 @@ func (s *Server) proxyToBackend(w http.ResponseWriter, r *http.Request, path str
 	r.URL.Path = path
 
 	proxy.ServeHTTP(w, r)
+}
+
+// readOpenAIBody reads and size-caps the request body for an OpenAI-style
+// endpoint, writing an OpenAI-shaped error on failure. Returns (body, true)
+// on success, (nil, false) after writing an error.
+func (s *Server) readOpenAIBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only POST is allowed")
+		return nil, false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			s.writeError(w, http.StatusRequestEntityTooLarge, "invalid_request",
+				fmt.Sprintf("Request body exceeds %d bytes", maxRequestBodyBytes))
+			return nil, false
+		}
+		s.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to read request body")
+		return nil, false
+	}
+	r.Body.Close()
+	return body, true
+}
+
+// extractOpenAIModel pulls the model field out of an OpenAI-style request
+// body, writing an OpenAI-shaped error on failure.
+func (s *Server) extractOpenAIModel(w http.ResponseWriter, body []byte) (string, bool) {
+	var req struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request body")
+		return "", false
+	}
+	if req.Model == "" {
+		s.writeError(w, http.StatusBadRequest, "invalid_request", "Model field is required")
+		return "", false
+	}
+	return req.Model, true
 }
 
 // generateRequestID creates a unique request ID in Anthropic format

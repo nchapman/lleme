@@ -41,14 +41,12 @@ var listCmd = &cobra.Command{
 			AddColumn("SIZE", 10, ui.AlignRight).
 			AddColumn("LAST USED", 12, ui.AlignRight)
 
+		// m.LastUsed is already the metadata's LastUsed (with file-mtime
+		// fallback). No need to re-read metadata.yaml per row.
 		var totalSize int64
 		for _, m := range models {
-			lastUsed := hf.GetLastUsed(m.User, m.Repo, m.Quant)
-			if lastUsed.IsZero() {
-				lastUsed = m.LastUsed
-			}
 			modelRef := fmt.Sprintf("%s/%s", m.User, m.Repo)
-			table.AddRow(modelRef, m.Quant, m.Backend, ui.FormatBytes(m.Size), formatTime(lastUsed))
+			table.AddRow(modelRef, m.Quant, m.Backend, ui.FormatBytes(m.Size), formatTime(m.LastUsed))
 			totalSize += m.Size
 		}
 

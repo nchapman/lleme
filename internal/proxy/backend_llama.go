@@ -70,6 +70,23 @@ func (r *LlamaRuntime) IsStartupError(logPath string) bool {
 	return hasStartupError(logPath)
 }
 
+// SignificantOptions returns llama-server flags that change model-load
+// behavior. Sampling knobs (temp, top-p, ...) are overridable per-request
+// and stay off the list — changing them shouldn't force a reload.
+func (r *LlamaRuntime) SignificantOptions() []string {
+	return []string{
+		"ctx-size",
+		"gpu-layers",
+		"threads",
+		"batch-size",
+		"ubatch-size",
+		"flash-attn",
+		"mlock",
+		"cache-type-k",
+		"cache-type-v",
+	}
+}
+
 // findMMProjForModel parses the model name and checks if an mmproj file exists.
 // ModelName format: "user/repo:quant" (e.g., "ggml-org/gemma-3-4b-it-GGUF:Q4_K_M")
 func findMMProjForModel(modelName string) string {

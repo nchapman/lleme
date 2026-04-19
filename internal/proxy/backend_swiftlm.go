@@ -42,62 +42,74 @@ func (r *SwiftLMRuntime) HealthURL(host string, port int) string {
 	return fmt.Sprintf("http://%s:%d/health", host, port)
 }
 
-// swiftlmValueFlags maps an option key to the CLI flag SwiftLM expects.
-// Keys are the snake_case / kebab-case forms our options pipeline produces
-// (CLI flags → config → preset → persona → request body); values are
-// SwiftLM's own flag names, confirmed against `SwiftLM --help` on b517.
+// SignificantOptions returns SwiftLM flags that force a reload when
+// changed. Per-request sampling (temp, top-p, top-k, min-p, repeat-penalty)
+// and max_tokens are overridable on each /v1/chat/completions call and
+// stay off the list. Keys are kebab-case; optionsChanged normalizes inputs
+// so callers can supply either form.
+func (r *SwiftLMRuntime) SignificantOptions() []string {
+	return []string{
+		"ctx-size",
+		"parallel",
+		"gpu-layers",
+		"mem-limit",
+		"prefill-size",
+		"prefill",
+		"thinking",
+		"vision",
+		"audio",
+		"stream-experts",
+		"turbo-kv",
+		"ssd-prefetch",
+		"calibrate",
+		"draft-model",
+		"num-draft-tokens",
+		"api-key",
+	}
+}
+
+// swiftlmValueFlags maps kebab-case option keys to the CLI flag SwiftLM
+// expects. Callers feed mixed casing (snake_case from YAML/JSON, kebab-case
+// from CLI flags); mapSwiftLMOptions normalizes `_` → `-` before lookup so
+// this table stays a single entry per flag. Confirmed against
+// `SwiftLM --help` on b517.
 //
-// Anything not on this list is dropped — SwiftLM rejects unknown flags at
-// startup with a bare `Error:` line, so silently ignoring llama-only keys
-// (mirostat, xtc_*, dry_*, frequency_penalty, grammar, ...) is strictly
-// safer than forwarding them.
+// Anything not on this list (or swiftlmBoolFlags) is dropped — SwiftLM
+// rejects unknown flags at startup with a bare `Error:` line, so silently
+// ignoring llama-only keys (mirostat, xtc-*, dry-*, frequency-penalty,
+// grammar, ...) is strictly safer than forwarding them.
 var swiftlmValueFlags = map[string]string{
 	// Core
-	"ctx_size":     "--ctx-size",
 	"ctx-size":     "--ctx-size",
-	"max_tokens":   "--max-tokens",
 	"max-tokens":   "--max-tokens",
 	"parallel":     "--parallel",
-	"gpu_layers":   "--gpu-layers",
 	"gpu-layers":   "--gpu-layers",
-	"mem_limit":    "--mem-limit",
 	"mem-limit":    "--mem-limit",
 	"prefill":      "--prefill-size",
-	"prefill_size": "--prefill-size",
 	"prefill-size": "--prefill-size",
-	"api_key":      "--api-key",
 	"api-key":      "--api-key",
 	"cors":         "--cors",
 	// Sampling
 	"temp":               "--temp",
 	"temperature":        "--temp",
-	"top_p":              "--top-p",
 	"top-p":              "--top-p",
-	"top_k":              "--top-k",
 	"top-k":              "--top-k",
-	"min_p":              "--min-p",
 	"min-p":              "--min-p",
-	"repeat_penalty":     "--repeat-penalty",
 	"repeat-penalty":     "--repeat-penalty",
-	"repetition_penalty": "--repeat-penalty",
+	"repetition-penalty": "--repeat-penalty",
 	// Speculative decoding
-	"draft_model":      "--draft-model",
 	"draft-model":      "--draft-model",
-	"num_draft_tokens": "--num-draft-tokens",
 	"num-draft-tokens": "--num-draft-tokens",
 }
 
 // swiftlmBoolFlags are SwiftLM's boolean switches. A truthy value emits the
-// flag; a falsy value omits it.
+// flag; a falsy value omits it. Keys are kebab-case (snake_case normalized).
 var swiftlmBoolFlags = map[string]string{
 	"thinking":       "--thinking",
 	"vision":         "--vision",
 	"audio":          "--audio",
-	"stream_experts": "--stream-experts",
 	"stream-experts": "--stream-experts",
-	"turbo_kv":       "--turbo-kv",
 	"turbo-kv":       "--turbo-kv",
-	"ssd_prefetch":   "--ssd-prefetch",
 	"ssd-prefetch":   "--ssd-prefetch",
 	"calibrate":      "--calibrate",
 }
@@ -125,9 +137,12 @@ func (r *SwiftLMRuntime) BuildArgs(backend *Backend, host string) []string {
 // mapSwiftLMOptions turns an option map into SwiftLM CLI args, dropping any
 // key that isn't on the allow-list. Value handling mirrors the llama
 // runtime: int/float/string formatted verbatim, bool emits the flag if true.
+// Keys are normalized snake_case → kebab-case before lookup so the allow-list
+// only needs one entry per flag.
 func mapSwiftLMOptions(opts map[string]any) []string {
 	var args []string
-	for key, value := range opts {
+	for rawKey, value := range opts {
+		key := strings.ReplaceAll(rawKey, "_", "-")
 		if flag, ok := swiftlmBoolFlags[key]; ok {
 			if isTruthy(value) {
 				args = append(args, flag)

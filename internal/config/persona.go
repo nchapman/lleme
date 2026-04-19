@@ -55,6 +55,11 @@ func (p *Persona) GetServerOptions(kind string) map[string]any {
 }
 
 // backendOptions returns the Options map for the given backend kind, or nil.
+// Kind strings mirror the hf package's BackendGGUF / BackendMLX constants;
+// kept as string literals here to avoid importing hf and creating a
+// config → hf dependency (hf already depends on config). If these strings
+// ever drift, the hf package's parseBackendKind will reject the value and
+// the selectRuntime switch will surface the mismatch.
 func (p *Persona) backendOptions(kind string) map[string]any {
 	switch kind {
 	case "gguf":

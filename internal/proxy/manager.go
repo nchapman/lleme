@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -109,7 +110,7 @@ func (m *ModelManager) GetOrLoadBackend(modelQuery string, options map[string]an
 		switch status := backend.GetStatus(); status {
 		case BackendReady:
 			// Check if options changed - if so, reload the model
-			if optionsChanged(backend.Options, options) {
+			if optionsChanged(backend.Runtime, backend.Options, options) {
 				// Mark as stopping to prevent race conditions
 				backend.SetStatus(BackendStopping)
 				m.mu.Unlock()
@@ -223,7 +224,7 @@ func (m *ModelManager) finalizeReadyBackend(modelQuery, modelName string, backen
 		m.mu.Unlock()
 		return m.GetOrLoadBackend(modelQuery, options)
 	}
-	if optionsChanged(backend.Options, options) {
+	if optionsChanged(backend.Runtime, backend.Options, options) {
 		m.mu.Unlock()
 		if err := m.StopBackend(modelName); err != nil {
 			return nil, fmt.Errorf("reload with new options: %w", err)
@@ -555,7 +556,13 @@ func (e *ModelNotFoundError) Error() string {
 // optionsChanged returns true if the new options differ from the current options.
 // Only compares options that affect model loading (server options).
 // Returns false if both are nil/empty, or if they have the same values.
-func optionsChanged(current, new map[string]any) bool {
+// optionsChanged reports whether the given new options would require
+// reloading the backend currently serving the model. Uses the Runtime's
+// SignificantOptions() list so the set of reload-worthy keys is a
+// per-backend concern. Maps are normalized to kebab-case before lookup so
+// `turbo_kv` from YAML and `turbo-kv` from a CLI flag compare equal.
+// Nil / empty on either side is handled early.
+func optionsChanged(runtime Runtime, current, new map[string]any) bool {
 	// If new options are nil/empty, no change requested
 	if len(new) == 0 {
 		return false
@@ -566,12 +573,14 @@ func optionsChanged(current, new map[string]any) bool {
 		return true
 	}
 
-	// Compare the options that matter for model loading
-	serverOptions := []string{"ctx-size", "gpu-layers", "threads", "batch-size", "ubatch-size", "flash-attn", "mlock", "cache-type-k", "cache-type-v"}
-
-	for _, key := range serverOptions {
-		newVal, newExists := new[key]
-		curVal, curExists := current[key]
+	// Compare the options that matter for this runtime's model loading.
+	// Each Runtime declares its own list so changing a llama-only key
+	// doesn't trigger a reload on SwiftLM (and vice versa).
+	curNorm := normalizeOptionKeys(current)
+	newNorm := normalizeOptionKeys(new)
+	for _, key := range runtime.SignificantOptions() {
+		newVal, newExists := newNorm[key]
+		curVal, curExists := curNorm[key]
 
 		if newExists != curExists {
 			return true
@@ -582,6 +591,21 @@ func optionsChanged(current, new map[string]any) bool {
 	}
 
 	return false
+}
+
+// normalizeOptionKeys returns m with every key's `_` replaced by `-`.
+// Input maps can mix forms (YAML supplies snake_case by convention; CLI
+// flags produce kebab-case); this lets comparisons happen on a single
+// vocabulary without the caller having to normalize upstream.
+func normalizeOptionKeys(m map[string]any) map[string]any {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[strings.ReplaceAll(k, "_", "-")] = v
+	}
+	return out
 }
 
 // optionValuesEqual compares two option values, handling type coercion.
