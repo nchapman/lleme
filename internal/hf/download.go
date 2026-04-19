@@ -13,6 +13,7 @@ import (
 
 	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/fileutil"
+	"github.com/nchapman/lleme/internal/logs"
 	"github.com/nchapman/lleme/internal/version"
 	"gopkg.in/yaml.v3"
 )
@@ -387,6 +388,11 @@ func BackendKindForModelName(fullName string) string {
 	}
 	kind, err := GetBackendKind(repoPart[:slash], repoPart[slash+1:], quant)
 	if err != nil {
+		// Genuinely corrupt / unreadable metadata lands here; the "missing
+		// file" case returns (BackendGGUF, nil) and stays silent. Warn so a
+		// user seeing the wrong runtime dispatched to an MLX model has a
+		// log entry to correlate with.
+		logs.Warn("BackendKindForModelName falling back to gguf", "model", fullName, "error", err)
 		return BackendGGUF
 	}
 	return kind
