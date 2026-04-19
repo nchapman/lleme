@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGenerateRequestID(t *testing.T) {
@@ -214,5 +217,70 @@ func TestOpenAIEndpointReturnsOpenAIErrors(t *testing.T) {
 	}
 	if resp.Error.Type != "invalid_request" {
 		t.Errorf("expected OpenAI error type 'invalid_request', got '%s'", resp.Error.Type)
+	}
+}
+
+// TestHandleModelsSortedByLastUsed verifies that /v1/models returns downloaded
+// models ordered by most recently used first, falling back to the GGUF file's
+// mtime when no persisted last-used metadata exists.
+func TestHandleModelsSortedByLastUsed(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("LLEME_HOME", tmpDir)
+
+	modelsDir := filepath.Join(tmpDir, "models")
+	// Create three models and set distinct mtimes so the fallback path is ordered.
+	specs := []struct {
+		user, repo, quant string
+		mtime             time.Time
+	}{
+		{"u", "old", "Q4_K_M", time.Now().Add(-72 * time.Hour)},
+		{"u", "recent", "Q4_K_M", time.Now().Add(-1 * time.Hour)},
+		{"u", "middle", "Q4_K_M", time.Now().Add(-24 * time.Hour)},
+	}
+	for _, sp := range specs {
+		dir := filepath.Join(modelsDir, sp.user, sp.repo)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, sp.quant+".gguf")
+		if err := os.WriteFile(path, []byte("fake"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, sp.mtime, sp.mtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := &Server{
+		manager:   NewModelManager(DefaultConfig(), nil),
+		config:    DefaultConfig(),
+		startedAt: time.Now(),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	w := httptest.NewRecorder()
+	s.handleModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp OpenAIModelsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	wantOrder := []string{
+		"u/recent:Q4_K_M",
+		"u/middle:Q4_K_M",
+		"u/old:Q4_K_M",
+	}
+	if len(resp.Data) != len(wantOrder) {
+		t.Fatalf("got %d models, want %d", len(resp.Data), len(wantOrder))
+	}
+	for i, want := range wantOrder {
+		if resp.Data[i].ID != want {
+			t.Errorf("position %d: got %s, want %s", i, resp.Data[i].ID, want)
+		}
 	}
 }

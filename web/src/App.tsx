@@ -10,13 +10,18 @@ import {
 } from "@/components/ui/tooltip";
 import { createLlemeTransport } from "@/lib/lleme-transport";
 import { useChatWithPersistence } from "@/lib/use-chat-with-persistence";
-import { useState, useMemo, type FC, type ComponentPropsWithRef } from "react";
+import {
+  useState,
+  useMemo,
+  useEffect,
+  type FC,
+  type ComponentPropsWithRef,
+} from "react";
 import { ModelSelector } from "@/components/model-selector";
+import { useModels } from "@/lib/lleme-api";
 import { MenuIcon, MessagesSquare, PanelLeftIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { TooltipContentProps } from "@radix-ui/react-tooltip";
-
-const DEFAULT_MODEL = "unsloth/gpt-oss-20b-GGUF:Q4_K_M";
 
 type ButtonWithTooltipProps = ComponentPropsWithRef<typeof Button> & {
   tooltip: string;
@@ -119,8 +124,16 @@ const Header: FC<{
 };
 
 export default function App() {
-  const [model, setModel] = useState(DEFAULT_MODEL);
+  const [model, setModel] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const { models } = useModels();
+
+  useEffect(() => {
+    const first = models[0];
+    if (!first) return;
+    if (model && models.some((m) => m.id === model)) return;
+    setModel(first.id);
+  }, [model, models]);
 
   const transport = useMemo(() => createLlemeTransport({ model }), [model]);
 

@@ -224,6 +224,14 @@ func GetMMProjFilePath(user, repo, quant string) string {
 	return filepath.Join(modelDir, quant+"-mmproj.gguf")
 }
 
+// IsMMProjFileName reports whether a GGUF filename is a vision-encoder companion
+// written by GetMMProjFilePath (e.g. "Q4_K_M-mmproj.gguf"). These files are
+// loaded via llama-server's --mmproj flag, not served as standalone models, so
+// walkers that enumerate downloaded models should skip them.
+func IsMMProjFileName(name string) bool {
+	return strings.HasSuffix(strings.ToLower(name), "-mmproj.gguf")
+}
+
 // GetManifestFilePath returns the path where the manifest is stored for a model.
 func GetManifestFilePath(user, repo, quant string) string {
 	modelDir := GetModelPath(user, repo)

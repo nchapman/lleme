@@ -153,6 +153,33 @@ func TestModelResolverWithTempDir(t *testing.T) {
 	}
 }
 
+func TestListDownloadedModelsSkipsMMProj(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	modelDir := filepath.Join(tmpDir, "unsloth", "Qwen3.5-9B-GGUF")
+	if err := os.MkdirAll(modelDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modelDir, "UD-Q4_K_XL.gguf"), []byte("fake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modelDir, "UD-Q4_K_XL-mmproj.gguf"), []byte("fake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resolver := &ModelResolver{modelsPath: tmpDir}
+	models, err := resolver.ListDownloadedModels()
+	if err != nil {
+		t.Fatalf("ListDownloadedModels() error = %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("ListDownloadedModels() returned %d models, want 1 (mmproj should be skipped)", len(models))
+	}
+	if models[0].Quant != "UD-Q4_K_XL" {
+		t.Errorf("Quant = %s, want UD-Q4_K_XL", models[0].Quant)
+	}
+}
+
 // setupTestModels creates a test directory with multiple models for resolve testing
 func setupTestModels(t *testing.T) *ModelResolver {
 	tmpDir := t.TempDir()
