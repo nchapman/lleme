@@ -89,6 +89,15 @@ func TestResolveFloat(t *testing.T) {
 			key:        "temp",
 			want:       1.0,
 		},
+		{
+			name:       "explicit 0.0 in preset is respected (not treated as unset)",
+			sessionVal: 0,
+			persona:    nil,
+			preset:     &presets.Preset{Options: map[string]any{"min-p": 0.0}},
+			config:     &config.Config{LlamaCpp: config.LlamaCpp{Options: map[string]any{"min-p": 0.05}}},
+			key:        "min-p",
+			want:       0.0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -165,6 +174,15 @@ func TestResolveInt(t *testing.T) {
 			config:     &config.Config{},
 			key:        "top-k",
 			want:       50,
+		},
+		{
+			name:       "explicit 0 in preset is respected (not treated as unset)",
+			sessionVal: 0,
+			persona:    nil,
+			preset:     &presets.Preset{Options: map[string]any{"top-k": 0}},
+			config:     &config.Config{LlamaCpp: config.LlamaCpp{Options: map[string]any{"top-k": 40}}},
+			key:        "top-k",
+			want:       0,
 		},
 	}
 

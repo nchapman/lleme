@@ -6,3 +6,4 @@ match:
 options:
   temp: 1.0
   top-p: 1.0
+  top-k: 0
