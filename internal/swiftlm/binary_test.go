@@ -2,6 +2,7 @@ package swiftlm
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -188,6 +189,138 @@ func TestPruneOldVersionsKeepsPrior(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(tmpDir, "SwiftLM-b1-macos-arm64")); !os.IsNotExist(err) {
 		t.Errorf("oldest version should have been pruned, stat err=%v", err)
+	}
+}
+
+// Symlink target must survive pruning regardless of keepPrior or whether
+// the caller's currentTag matches it. Defends against partial install state
+// leaving swiftlm-current pointing at a directory that pruneOldVersions
+// would otherwise delete.
+func TestPruneRespectsSymlinkTarget(t *testing.T) {
+	tmpDir := t.TempDir()
+	now := time.Now()
+	// b1 is oldest by mtime — would normally be pruned with keepPrior=1 and
+	// currentTag=b4. We'll point swiftlm-current at it to simulate stale
+	// state; the symlink target must survive anyway.
+	versions := []struct {
+		name  string
+		mtime time.Time
+	}{
+		{"SwiftLM-b4-macos-arm64", now},
+		{"SwiftLM-b3-macos-arm64", now.Add(-1 * time.Hour)},
+		{"SwiftLM-b2-macos-arm64", now.Add(-2 * time.Hour)},
+		{"SwiftLM-b1-macos-arm64", now.Add(-10 * time.Hour)},
+	}
+	for _, v := range versions {
+		dir := filepath.Join(tmpDir, v.name)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(dir, v.mtime, v.mtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("SwiftLM-b1-macos-arm64", filepath.Join(tmpDir, currentLinkName)); err != nil {
+		t.Fatal(err)
+	}
+
+	// currentTag=b4 with keepPrior=1: normally would save b4 + b3, drop b2/b1.
+	// b1 must survive because it's the symlink target.
+	pruneOldVersions(tmpDir, "b4", 1)
+
+	if _, err := os.Stat(filepath.Join(tmpDir, "SwiftLM-b1-macos-arm64")); err != nil {
+		t.Errorf("symlink target must be retained even on mismatched currentTag: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "SwiftLM-b4-macos-arm64")); err != nil {
+		t.Errorf("currentTag directory should be retained: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "SwiftLM-b3-macos-arm64")); err != nil {
+		t.Errorf("most-recent prior should be retained with keepPrior=1: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "SwiftLM-b2-macos-arm64")); !os.IsNotExist(err) {
+		t.Errorf("b2 should be pruned with keepPrior=1: %v", err)
+	}
+}
+
+// extractTarGz must swap the swiftlm-current symlink to the newly-extracted
+// version even when a prior symlink points elsewhere. The upstream archive
+// is flat (no wrapper directory); the test mimics that shape.
+func TestExtractTarGzSwapsSymlink(t *testing.T) {
+	if _, err := exec.LookPath("tar"); err != nil {
+		t.Skip("tar not available")
+	}
+	tmpDir := t.TempDir()
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a flat archive containing just a stub `SwiftLM` binary.
+	srcDir := filepath.Join(tmpDir, "src")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "SwiftLM"), []byte("stub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(tmpDir, "swiftlm.tar.gz")
+	if err := exec.Command("tar", "-czf", archive, "-C", srcDir, "SwiftLM").Run(); err != nil {
+		t.Fatalf("tar: %v", err)
+	}
+
+	// Pre-create an older version dir + symlink to simulate upgrade.
+	oldDir := filepath.Join(binDir, "SwiftLM-b500-macos-arm64")
+	if err := os.MkdirAll(oldDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("SwiftLM-b500-macos-arm64", filepath.Join(binDir, currentLinkName)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := extractTarGz(archive, binDir, "b600"); err != nil {
+		t.Fatalf("extractTarGz: %v", err)
+	}
+
+	target, err := os.Readlink(filepath.Join(binDir, currentLinkName))
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if target != "SwiftLM-b600-macos-arm64" {
+		t.Errorf("symlink target = %q, want SwiftLM-b600-macos-arm64", target)
+	}
+	// Sanity: the new version dir exists and contains the stub binary.
+	if _, err := os.Stat(filepath.Join(binDir, "SwiftLM-b600-macos-arm64", "SwiftLM")); err != nil {
+		t.Errorf("extracted binary missing: %v", err)
+	}
+}
+
+// extractTarGz must reject an archive that doesn't contain the SwiftLM
+// binary where expected — a mangled upstream asset shouldn't silently swap
+// the current symlink to an unusable directory.
+func TestExtractTarGzRejectsMissingBinary(t *testing.T) {
+	if _, err := exec.LookPath("tar"); err != nil {
+		t.Skip("tar not available")
+	}
+	tmpDir := t.TempDir()
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Archive contains the wrong binary name.
+	srcDir := filepath.Join(tmpDir, "src")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "WrongName"), []byte("stub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(tmpDir, "swiftlm.tar.gz")
+	if err := exec.Command("tar", "-czf", archive, "-C", srcDir, "WrongName").Run(); err != nil {
+		t.Fatalf("tar: %v", err)
+	}
+
+	if err := extractTarGz(archive, binDir, "b600"); err == nil {
+		t.Error("extractTarGz should reject archive without SwiftLM binary")
 	}
 }
 
