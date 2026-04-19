@@ -15,6 +15,7 @@ import (
 	"github.com/nchapman/lleme/internal/hf"
 	"github.com/nchapman/lleme/internal/llama"
 	"github.com/nchapman/lleme/internal/logs"
+	"github.com/nchapman/lleme/internal/presets"
 	"github.com/nchapman/lleme/internal/proxy"
 	"github.com/nchapman/lleme/internal/server"
 	"github.com/nchapman/lleme/internal/tui/chat"
@@ -125,6 +126,15 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 		// Use the resolved full model name
 		modelName := resolvedModel.FullName
 
+		// Look up built-in preset for this model family.
+		activePreset, matchedPattern := presets.Find(modelName)
+		if activePreset != nil {
+			fmt.Println(ui.Muted("Using preset: " + activePreset.Name + " (matched " + matchedPattern + ")"))
+			logs.Info("Applied preset", "name", activePreset.Name, "pattern", matchedPattern, "model", modelName)
+		} else {
+			logs.Debug("No preset matched", "model", modelName)
+		}
+
 		// Track which server options were explicitly set
 		ctxSizeSet := cmd.Flags().Changed("ctx-size")
 		gpuLayersSet := cmd.Flags().Changed("gpu-layers")
@@ -162,9 +172,10 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 			if activePersona != nil {
 				personaOpts = activePersona.GetServerOptions()
 			}
-			if ctxSizeSet || gpuLayersSet || threadsSet || personaOpts != nil {
+			mergedOpts := presets.MergeServerOptions(activePreset, personaOpts)
+			if ctxSizeSet || gpuLayersSet || threadsSet || mergedOpts != nil {
 				opts := &server.RunOptions{
-					Options: personaOpts,
+					Options: mergedOpts,
 				}
 				if ctxSizeSet {
 					opts.CtxSize = server.IntPtr(ctxSize)
@@ -180,7 +191,7 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 				}
 			}
 
-			session := NewChatSession(api, modelName, cfg, activePersona)
+			session := NewChatSession(api, modelName, cfg, activePersona, activePreset)
 			session.SetSystemPrompt(systemPrompt)
 			session.SetSamplingOptions(temperature, topP, minP, repeatPenalty, presencePenalty, frequencyPenalty, topK, tokens)
 			if err := session.Run(promptArg); err != nil {
@@ -190,7 +201,7 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 		}
 
 		// Launch TUI for interactive mode
-		m := chat.New(api, modelName, cfg, activePersona, personaName)
+		m := chat.New(api, modelName, cfg, activePersona, activePreset, personaName)
 		m.SetInitialServerOptions(ctxSize, gpuLayers, threads, ctxSizeSet, gpuLayersSet, threadsSet)
 		m.SetSamplingOptions(temperature, topP, minP, repeatPenalty, presencePenalty, frequencyPenalty, topK, tokens)
 		m.SetSystemPrompt(systemPrompt)

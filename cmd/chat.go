@@ -7,6 +7,7 @@ import (
 
 	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/options"
+	"github.com/nchapman/lleme/internal/presets"
 	"github.com/nchapman/lleme/internal/server"
 	"github.com/nchapman/lleme/internal/ui"
 )
@@ -32,12 +33,12 @@ type ChatSession struct {
 }
 
 // NewChatSession creates a new chat session.
-func NewChatSession(api *server.APIClient, model string, cfg *config.Config, persona *config.Persona) *ChatSession {
+func NewChatSession(api *server.APIClient, model string, cfg *config.Config, persona *config.Persona, preset *presets.Preset) *ChatSession {
 	return &ChatSession{
 		api:      api,
 		model:    model,
 		persona:  persona,
-		resolver: options.NewResolver(persona, cfg),
+		resolver: options.NewResolver(persona, cfg, preset),
 		messages: []server.ChatMessage{},
 	}
 }

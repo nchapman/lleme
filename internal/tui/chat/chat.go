@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/options"
+	"github.com/nchapman/lleme/internal/presets"
 	"github.com/nchapman/lleme/internal/server"
 	"github.com/nchapman/lleme/internal/tui/components"
 )
@@ -70,6 +71,7 @@ type Model struct {
 	model       string
 	cfg         *config.Config
 	persona     *config.Persona
+	preset      *presets.Preset
 	personaName string
 	resolver    *options.Resolver
 
@@ -118,7 +120,7 @@ type SessionOptions struct {
 }
 
 // New creates a new chat TUI model
-func New(api *server.APIClient, modelName string, cfg *config.Config, persona *config.Persona, personaName string) *Model {
+func New(api *server.APIClient, modelName string, cfg *config.Config, persona *config.Persona, preset *presets.Preset, personaName string) *Model {
 	m := &Model{
 		header:   components.NewHeader(),
 		messages: components.NewMessages(),
@@ -129,8 +131,9 @@ func New(api *server.APIClient, modelName string, cfg *config.Config, persona *c
 		model:       modelName,
 		cfg:         cfg,
 		persona:     persona,
+		preset:      preset,
 		personaName: personaName,
-		resolver:    options.NewResolver(persona, cfg),
+		resolver:    options.NewResolver(persona, cfg, preset),
 
 		chatMessages: []server.ChatMessage{},
 		keys:         DefaultKeyMap(),
@@ -201,11 +204,12 @@ func (m *Model) preloadModel() tea.Cmd {
 	if m.persona != nil {
 		personaOpts = m.persona.GetServerOptions()
 	}
+	mergedOpts := presets.MergeServerOptions(m.preset, personaOpts)
 
 	return func() tea.Msg {
 		var opts *server.RunOptions
-		if options.CtxSizeSet || options.GpuLayersSet || options.ThreadsSet || personaOpts != nil {
-			opts = &server.RunOptions{Options: personaOpts}
+		if options.CtxSizeSet || options.GpuLayersSet || options.ThreadsSet || mergedOpts != nil {
+			opts = &server.RunOptions{Options: mergedOpts}
 			if options.CtxSizeSet {
 				opts.CtxSize = server.IntPtr(options.CtxSize)
 			}

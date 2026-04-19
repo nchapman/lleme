@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/nchapman/lleme/internal/presets"
 	"github.com/nchapman/lleme/internal/server"
 	"github.com/nchapman/lleme/internal/tui/components"
 )
@@ -135,10 +136,12 @@ func (m *Model) handleReload() CommandResultMsg {
 		return CommandResultMsg{Message: fmt.Sprintf("Failed to stop model: %v", err), IsError: true}
 	}
 
-	// Reload with persona options as base, session options override
-	opts := &server.RunOptions{}
+	var personaOpts map[string]any
 	if m.persona != nil {
-		opts.Options = m.persona.GetServerOptions()
+		personaOpts = m.persona.GetServerOptions()
+	}
+	opts := &server.RunOptions{
+		Options: presets.MergeServerOptions(m.preset, personaOpts),
 	}
 	if m.options.CtxSizeSet {
 		opts.CtxSize = server.IntPtr(m.options.CtxSize)
@@ -193,66 +196,72 @@ func (m *Model) showSettings() string {
 
 	// Request-time options
 	sb.WriteString("  Sampling:\n")
-	sb.WriteString(m.formatOption("temp", m.options.Temp, m.resolver.GetConfigFloat("temp")))
-	sb.WriteString(m.formatOption("top-p", m.options.TopP, m.resolver.GetConfigFloat("top-p")))
-	sb.WriteString(m.formatOptionInt("top-k", m.options.TopK, m.resolver.GetConfigInt("top-k")))
-	sb.WriteString(m.formatOption("repeat-penalty", m.options.RepeatPenalty, m.resolver.GetConfigFloat("repeat-penalty")))
-	sb.WriteString(m.formatOption("presence-penalty", m.options.PresencePenalty, m.resolver.GetConfigFloat("presence-penalty")))
-	sb.WriteString(m.formatOption("frequency-penalty", m.options.FrequencyPenalty, m.resolver.GetConfigFloat("frequency-penalty")))
-	sb.WriteString(m.formatOption("min-p", m.options.MinP, m.resolver.GetConfigFloat("min-p")))
+	sb.WriteString(m.formatOption("temp", m.options.Temp, "temp"))
+	sb.WriteString(m.formatOption("top-p", m.options.TopP, "top-p"))
+	sb.WriteString(m.formatOptionInt("top-k", m.options.TopK, "top-k"))
+	sb.WriteString(m.formatOption("repeat-penalty", m.options.RepeatPenalty, "repeat-penalty"))
+	sb.WriteString(m.formatOption("presence-penalty", m.options.PresencePenalty, "presence-penalty"))
+	sb.WriteString(m.formatOption("frequency-penalty", m.options.FrequencyPenalty, "frequency-penalty"))
+	sb.WriteString(m.formatOption("min-p", m.options.MinP, "min-p"))
 	sb.WriteString("\n")
 
 	// Server options
 	sb.WriteString("  Server:\n")
-	sb.WriteString(m.formatServerOption("ctx-size", m.options.CtxSize, m.options.CtxSizeSet, m.resolver.GetConfigInt("ctx-size")))
-	sb.WriteString(m.formatServerOption("gpu-layers", m.options.GpuLayers, m.options.GpuLayersSet, m.resolver.GetConfigInt("gpu-layers")))
-	sb.WriteString(m.formatServerOption("threads", m.options.Threads, m.options.ThreadsSet, m.resolver.GetConfigInt("threads")))
+	sb.WriteString(m.formatServerOption("ctx-size", m.options.CtxSize, m.options.CtxSizeSet, "ctx-size"))
+	sb.WriteString(m.formatServerOption("gpu-layers", m.options.GpuLayers, m.options.GpuLayersSet, "gpu-layers"))
+	sb.WriteString(m.formatServerOption("threads", m.options.Threads, m.options.ThreadsSet, "threads"))
 
 	return sb.String()
 }
 
-// formatSetting formats a setting line showing session/config/default value.
-func formatSetting(name, sessionVal, configVal string) string {
+// formatSetting formats a setting line showing session/source/default value.
+func formatSetting(name, sessionVal, nonSessionVal, source string) string {
 	if sessionVal != "" {
 		return fmt.Sprintf("    %s = %s (session)\n", name, sessionVal)
 	}
-	if configVal != "" {
-		return fmt.Sprintf("    %s = %s (config)\n", name, configVal)
+	if nonSessionVal != "" {
+		return fmt.Sprintf("    %s = %s (%s)\n", name, nonSessionVal, source)
 	}
 	return fmt.Sprintf("    %s = default\n", name)
 }
 
-func (m *Model) formatOption(name string, sessionVal, configVal float64) string {
-	var session, config string
+func (m *Model) formatOption(name string, sessionVal float64, key string) string {
+	var session string
 	if sessionVal != 0 {
 		session = fmt.Sprintf("%g", sessionVal)
 	}
-	if configVal != 0 {
-		config = fmt.Sprintf("%g", configVal)
+	v, source := m.resolver.GetConfigFloatWithSource(key)
+	var config string
+	if v != 0 {
+		config = fmt.Sprintf("%g", v)
 	}
-	return formatSetting(name, session, config)
+	return formatSetting(name, session, config, source)
 }
 
-func (m *Model) formatOptionInt(name string, sessionVal, configVal int) string {
-	var session, config string
+func (m *Model) formatOptionInt(name string, sessionVal int, key string) string {
+	var session string
 	if sessionVal != 0 {
 		session = fmt.Sprintf("%d", sessionVal)
 	}
-	if configVal != 0 {
-		config = fmt.Sprintf("%d", configVal)
+	v, source := m.resolver.GetConfigIntWithSource(key)
+	var config string
+	if v != 0 {
+		config = fmt.Sprintf("%d", v)
 	}
-	return formatSetting(name, session, config)
+	return formatSetting(name, session, config, source)
 }
 
-func (m *Model) formatServerOption(name string, sessionVal int, isSet bool, configVal int) string {
-	var session, config string
+func (m *Model) formatServerOption(name string, sessionVal int, isSet bool, key string) string {
+	var session string
 	if isSet {
 		session = fmt.Sprintf("%d", sessionVal)
 	}
-	if configVal != 0 {
-		config = fmt.Sprintf("%d", configVal)
+	v, source := m.resolver.GetConfigIntWithSource(key)
+	var config string
+	if v != 0 {
+		config = fmt.Sprintf("%d", v)
 	}
-	return formatSetting(name, session, config)
+	return formatSetting(name, session, config, source)
 }
 
 // ClearMessages clears the messages viewport (called from command handler)
