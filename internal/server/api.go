@@ -258,61 +258,37 @@ func handleStreamLine(line string, cb StreamCallback) error {
 
 // StopModel unloads a model from the proxy server.
 func (api *APIClient) StopModel(model string) error {
-	type StopModelRequest struct {
+	return api.postJSON(fmt.Sprintf("%s/api/stop", api.baseURL), struct {
 		Model string `json:"model"`
-	}
-
-	url := fmt.Sprintf("%s/api/stop", api.baseURL)
-
-	req := StopModelRequest{Model: model}
-	body, err := json.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
-	}
-
-	httpReq, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := api.client.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	return checkResponse(resp, "stop model")
+	}{Model: model}, "stop model")
 }
 
 func (api *APIClient) SetModel(modelPath string) error {
-	type LoadModelRequest struct {
+	return api.postJSON(fmt.Sprintf("%s/v1/load", api.baseURL), struct {
 		Model string `json:"model"`
-	}
+	}{Model: modelPath}, "load model")
+}
 
-	url := fmt.Sprintf("%s/v1/load", api.baseURL)
-
-	req := LoadModelRequest{Model: modelPath}
-	body, err := json.Marshal(req)
+func (api *APIClient) postJSON(url string, payload any, operation string) error {
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := api.client.Do(httpReq)
+	resp, err := api.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("send request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	return checkResponse(resp, "load model")
+	return checkResponse(resp, operation)
 }
 
 // RunOptions contains server options for loading a model.

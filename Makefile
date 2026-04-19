@@ -19,11 +19,12 @@ install:
 test:
 	go test ./...
 
-# Format, vet, and test
+# Format, vet, test, and lint
 check:
 	go fmt ./...
 	go vet ./...
 	go test ./...
+	golangci-lint run
 
 # Clean build artifacts
 clean:

@@ -52,7 +52,7 @@ func (m *ModelManager) SetStateChangeCallback(fn func()) {
 
 // GetOrLoadBackend returns a backend for the given model, loading it if necessary.
 // Options override config defaults for this specific load (ctx-size, gpu-layers, etc.).
-func (m *ModelManager) GetOrLoadBackend(modelQuery string, options map[string]any) (*Backend, error) { //nolint:gocognit // TODO: refactor after adding integration tests for locking behavior
+func (m *ModelManager) GetOrLoadBackend(modelQuery string, options map[string]any) (*Backend, error) { //nolint:gocognit,cyclop // TODO: refactor after adding integration tests for locking behavior
 	// First, resolve the model name
 	result, err := m.resolver.Resolve(modelQuery)
 	if err != nil {

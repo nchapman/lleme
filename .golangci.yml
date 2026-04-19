@@ -3,11 +3,20 @@ linters:
   disable:
     - errcheck
     - unused
+  enable:
+    - cyclop
+    - dupl
   settings:
     gocognit:
       min-complexity: 15
+    cyclop:
+      max-complexity: 15
+    dupl:
+      threshold: 100
   exclusions:
     rules:
       - path: _test\.go
         linters:
           - gocognit
+          - cyclop
+          - dupl

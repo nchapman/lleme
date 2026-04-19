@@ -62,8 +62,7 @@ func runUpdateAll(cmd *cobra.Command, args []string) {
 		llamaLatestStr = llamaRelease.TagName
 	}
 
-	llamaNeedsUpdate := llamaFetchErr == nil && llamaRelease != nil &&
-		(llamaInstalled == nil || llamaInstalled.TagName != llamaRelease.TagName)
+	llamaNeedsUpdate := llamaUpdateAvailable(llamaInstalled, llamaRelease, llamaFetchErr)
 
 	// Display status
 	printComponentStatus("lleme", llemeInstalled, llemeLatest, llemeErr, llemeNeedsUpdate)
@@ -108,6 +107,13 @@ func runUpdateAll(cmd *cobra.Command, args []string) {
 	}
 
 	restartServerIfRunning()
+}
+
+func llamaUpdateAvailable(installed *llama.VersionInfo, latest *llama.Release, fetchErr error) bool {
+	if fetchErr != nil || latest == nil {
+		return false
+	}
+	return installed == nil || installed.TagName != latest.TagName
 }
 
 func printComponentStatus(name, installed, available string, fetchErr error, needsUpdate bool) {
