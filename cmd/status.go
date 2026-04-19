@@ -8,6 +8,7 @@ import (
 
 	"github.com/nchapman/lleme/internal/llama"
 	"github.com/nchapman/lleme/internal/proxy"
+	"github.com/nchapman/lleme/internal/swiftlm"
 	"github.com/nchapman/lleme/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -86,13 +87,29 @@ var statusCmd = &cobra.Command{
 		if len(status.Models) != 1 {
 			modelWord = "models"
 		}
-		installed, _ := llama.GetInstalledVersion()
-		if installed != nil {
-			fmt.Printf("%d %s loaded %s %s\n", len(status.Models), modelWord, ui.Muted("•"), ui.LlamaCppCredit(installed.TagName))
+		credit := ui.BackendsCredit(installedBackendTags())
+		if credit != "" {
+			fmt.Printf("%d %s loaded %s %s\n", len(status.Models), modelWord, ui.Muted("•"), credit)
 		} else {
 			fmt.Printf("%d %s loaded\n", len(status.Models), modelWord)
 		}
 	},
+}
+
+// installedBackendTags returns the installed tags for each backend that has
+// a version file on disk, or "" for backends that aren't installed. On
+// unsupported platforms SwiftLM is always "". Callers hand both into
+// ui.BackendsCredit which joins the non-empty set.
+func installedBackendTags() (llamaTag, swiftTag string) {
+	if installed, _ := llama.GetInstalledVersion(); installed != nil {
+		llamaTag = installed.TagName
+	}
+	if swiftlm.IsSupported() {
+		if installed, _ := swiftlm.GetInstalledVersion(); installed != nil {
+			swiftTag = installed.TagName
+		}
+	}
+	return llamaTag, swiftTag
 }
 
 func getProxyStatus(proxyURL string) (*proxy.ProxyStatus, error) {

@@ -6,6 +6,7 @@ import (
 
 	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/llama"
+	"github.com/nchapman/lleme/internal/swiftlm"
 	"github.com/nchapman/lleme/internal/ui"
 	"github.com/nchapman/lleme/internal/version"
 	"github.com/spf13/cobra"
@@ -27,6 +28,18 @@ var versionCmd = &cobra.Command{
 			fmt.Printf("%s (%s)\n", ui.LlamaCppCredit(installed.TagName), backend)
 		} else {
 			fmt.Println(ui.Muted("llama.cpp not installed"))
+		}
+
+		// SwiftLM line only appears on supported platforms. On Linux we
+		// skip entirely rather than printing "SwiftLM not installed" on
+		// hosts where it could never be.
+		if swiftlm.IsSupported() {
+			swiftInstalled, _ := swiftlm.GetInstalledVersion()
+			if swiftInstalled != nil {
+				fmt.Println(ui.SwiftLMCredit(swiftInstalled.TagName))
+			} else {
+				fmt.Println(ui.Muted("SwiftLM not installed"))
+			}
 		}
 
 		fmt.Println()

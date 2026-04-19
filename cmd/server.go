@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/nchapman/lleme/internal/config"
-	"github.com/nchapman/lleme/internal/llama"
 	"github.com/nchapman/lleme/internal/logs"
 	"github.com/nchapman/lleme/internal/proxy"
 	"github.com/nchapman/lleme/internal/ui"
@@ -282,9 +281,8 @@ func startServerForeground() {
 	fmt.Printf("  %-12s %s %s\n", "Status", ui.Muted("GET"), "/api/status")
 	fmt.Println()
 
-	installed, _ := llama.GetInstalledVersion()
-	if installed != nil {
-		fmt.Println(ui.LlamaCppCredit(installed.TagName))
+	if credit := ui.BackendsCredit(installedBackendTags()); credit != "" {
+		fmt.Println(credit)
 	}
 	fmt.Println(ui.Muted("Press Ctrl+C to stop"))
 
