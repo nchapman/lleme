@@ -64,12 +64,24 @@ type LlamaCpp struct {
 // SwiftLM holds settings for the MLX / SwiftLM runtime. Scoped separately
 // from LlamaCpp so flags from one backend don't bleed into the other.
 type SwiftLM struct {
-	Options map[string]any `yaml:"options,omitempty"`
+	AutoUpdate *bool          `yaml:"auto_update,omitempty"`
+	Options    map[string]any `yaml:"options,omitempty"`
 }
 
 // AutoUpdateEnabled reports whether background llama.cpp updates are enabled.
 // Defaults to true when unset so fresh installs stay current without manual action.
 func (c *LlamaCpp) AutoUpdateEnabled() bool {
+	if c.AutoUpdate == nil {
+		return true
+	}
+	return *c.AutoUpdate
+}
+
+// AutoUpdateEnabled reports whether background SwiftLM updates are enabled.
+// Defaults to true for parity with LlamaCpp. No-ops on non-darwin-arm64
+// platforms regardless of this setting — gated by swiftlm.IsSupported() at
+// the call site.
+func (c *SwiftLM) AutoUpdateEnabled() bool {
 	if c.AutoUpdate == nil {
 		return true
 	}
@@ -234,6 +246,11 @@ llamacpp:
 # Apple Silicon. Unknown keys are silently dropped, so llamacpp options
 # above won't break MLX backends.
 swiftlm:
+  # Auto-update SwiftLM in the background on server start (default: true).
+  # Has no effect on non-Apple-Silicon hosts since SwiftLM isn't supported
+  # there.
+  # auto_update: true
+
   # options:
     # --- Core ---
     # ctx-size: 8192           # Context window (KV cache)

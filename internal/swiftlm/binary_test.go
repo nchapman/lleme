@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nchapman/lleme/internal/binaryrelease"
 )
@@ -140,8 +141,8 @@ func TestPruneOldVersionsKeepsCurrentAndSymlinkTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Prune with currentTag=b3: b1 and b2 should go.
-	pruneOldVersions(tmpDir, "b3")
+	// Prune with currentTag=b3, keepPrior=0: b1 and b2 should go.
+	pruneOldVersions(tmpDir, "b3", 0)
 
 	if _, err := os.Stat(filepath.Join(tmpDir, "SwiftLM-b3-macos-arm64")); err != nil {
 		t.Errorf("current version should survive: %v", err)
@@ -150,5 +151,60 @@ func TestPruneOldVersionsKeepsCurrentAndSymlinkTarget(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(tmpDir, d)); !os.IsNotExist(err) {
 			t.Errorf("%s should have been pruned", d)
 		}
+	}
+}
+
+// keepPrior=2 retains the two most-recent prior versions (newest first by
+// mtime) in addition to the current one. Mirrors the llama-side guarantee
+// used by auto-update to insure backends forked just before a symlink swap
+// keep the old binary on disk.
+func TestPruneOldVersionsKeepsPrior(t *testing.T) {
+	tmpDir := t.TempDir()
+	// Create four versions and stagger mtimes so the sort order is
+	// deterministic: b4 newest, b1 oldest.
+	dirs := []string{"SwiftLM-b1-macos-arm64", "SwiftLM-b2-macos-arm64", "SwiftLM-b3-macos-arm64", "SwiftLM-b4-macos-arm64"}
+	baseTime := time.Now()
+	for i, d := range dirs {
+		p := filepath.Join(tmpDir, d)
+		if err := os.MkdirAll(p, 0755); err != nil {
+			t.Fatal(err)
+		}
+		mtime := baseTime.Add(time.Duration(i) * time.Second)
+		if err := os.Chtimes(p, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := binaryrelease.SwapCurrentSymlink(tmpDir, currentLinkName, "SwiftLM-b4-macos-arm64"); err != nil {
+		t.Fatal(err)
+	}
+
+	// currentTag=b4, keepPrior=2: b4 + b3 + b2 survive, b1 is pruned.
+	pruneOldVersions(tmpDir, "b4", 2)
+
+	for _, survivor := range []string{"SwiftLM-b2-macos-arm64", "SwiftLM-b3-macos-arm64", "SwiftLM-b4-macos-arm64"} {
+		if _, err := os.Stat(filepath.Join(tmpDir, survivor)); err != nil {
+			t.Errorf("%s should survive keepPrior=2, got err %v", survivor, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "SwiftLM-b1-macos-arm64")); !os.IsNotExist(err) {
+		t.Errorf("oldest version should have been pruned, stat err=%v", err)
+	}
+}
+
+// NewerVersionAvailable returns (nil, nil, nil) when SwiftLM has never been
+// installed — the auto-update path bootstraps nothing, only refreshes.
+func TestNewerVersionAvailableNotInstalled(t *testing.T) {
+	if !IsSupported() {
+		t.Skip("NewerVersionAvailable bootstraps from an install; unsupported platforms short-circuit to nil anyway")
+	}
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	latest, installed, err := NewerVersionAvailable()
+	if err != nil {
+		t.Fatalf("not-installed case should not error: %v", err)
+	}
+	if latest != nil || installed != nil {
+		t.Errorf("expected (nil, nil), got latest=%+v installed=%+v", latest, installed)
 	}
 }

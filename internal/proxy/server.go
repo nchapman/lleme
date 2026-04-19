@@ -23,6 +23,7 @@ import (
 	"github.com/nchapman/lleme/internal/hf"
 	"github.com/nchapman/lleme/internal/llama"
 	"github.com/nchapman/lleme/internal/logs"
+	"github.com/nchapman/lleme/internal/swiftlm"
 	"github.com/nchapman/lleme/internal/version"
 )
 
@@ -115,50 +116,119 @@ func (s *Server) Start() error {
 	// Save initial state (no backends yet)
 	s.saveState()
 
-	// Check for llama.cpp updates in the background. Running backends keep using
-	// their currently-loaded binary; the new version is picked up on next model load.
+	// Check for backend updates in the background. Running backends keep using
+	// their currently-loaded binary; new versions are picked up on next model load.
 	ctx, cancel := context.WithCancel(context.Background())
 	s.autoUpdateCancel = cancel
 	go s.autoUpdateLlamaCpp(ctx)
+	go s.autoUpdateSwiftLM(ctx)
 
 	return nil
 }
 
-// autoUpdateLlamaCpp checks for a newer llama.cpp release and installs it in
-// the background. Runs on proxy startup. Failures are logged and do not affect
-// the proxy — the existing llama.cpp install remains functional. The context is
-// canceled on Stop so an in-flight download aborts rather than swapping the
-// llama-current symlink after shutdown.
-func (s *Server) autoUpdateLlamaCpp(ctx context.Context) {
-	if s.appConfig == nil || !s.appConfig.LlamaCpp.AutoUpdateEnabled() {
+// autoUpdateCheck bundles what one backend's NewerVersionAvailable +
+// identifiers resolve to before runBackendAutoUpdate drives the flow.
+type autoUpdateCheck struct {
+	name         string
+	enabled      bool
+	installedTag string
+	latestTag    string
+	haveLatest   bool
+	checkErr     error
+	install      func(context.Context) (string, error) // returns newly-installed tag
+}
+
+// runBackendAutoUpdate drives the check → install → log flow for one
+// backend. Failures never affect the proxy; the context is canceled on Stop
+// so an in-flight download aborts rather than swapping a symlink after
+// shutdown. Kept separate from the two per-backend constructors so the
+// shared logic isn't flagged as a duplicate.
+func runBackendAutoUpdate(ctx context.Context, c autoUpdateCheck) {
+	if !c.enabled {
 		return
 	}
-
-	latest, installed, err := llama.NewerVersionAvailable()
-	if err != nil {
-		logs.Debug("llama.cpp auto-update check failed", "error", err)
+	if c.checkErr != nil {
+		logs.Debug(c.name+" auto-update check failed", "error", c.checkErr)
 		return
 	}
-	if latest == nil {
+	if !c.haveLatest {
 		return
 	}
+	logs.Info("Auto-updating "+c.name+" in background", "from", c.installedTag, "to", c.latestTag)
 
-	fromTag := ""
-	if installed != nil {
-		fromTag = installed.TagName
-	}
-	logs.Info("Auto-updating llama.cpp in background", "from", fromTag, "to", latest.TagName)
-
-	info, err := llama.InstallReleaseForAutoUpdate(ctx, latest, nil)
+	newTag, err := c.install(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
-			logs.Debug("llama.cpp auto-update canceled on shutdown", "error", err)
+			logs.Debug(c.name+" auto-update canceled on shutdown", "error", err)
 			return
 		}
-		logs.Warn("llama.cpp auto-update failed", "error", err)
+		logs.Warn(c.name+" auto-update failed", "error", err)
 		return
 	}
-	logs.Info("llama.cpp auto-update installed; new model loads will use this version", "version", info.TagName)
+	logs.Info(c.name+" auto-update installed; new model loads will use this version", "version", newTag)
+}
+
+// autoUpdateLlamaCpp runs the llama.cpp auto-update check + install. The
+// structural twin autoUpdateSwiftLM below duplicates the glue deliberately
+// — collapsing both into a generic helper would lose per-backend types at
+// package boundaries; the shared flow lives in runBackendAutoUpdate.
+//
+//nolint:dupl // backend-identity repetition; see doc comment above.
+func (s *Server) autoUpdateLlamaCpp(ctx context.Context) {
+	latest, installed, err := llama.NewerVersionAvailable()
+	installedTag, latestTag := "", ""
+	if installed != nil {
+		installedTag = installed.TagName
+	}
+	if latest != nil {
+		latestTag = latest.TagName
+	}
+	runBackendAutoUpdate(ctx, autoUpdateCheck{
+		name:         "llama.cpp",
+		enabled:      s.appConfig != nil && s.appConfig.LlamaCpp.AutoUpdateEnabled(),
+		installedTag: installedTag,
+		latestTag:    latestTag,
+		haveLatest:   latest != nil,
+		checkErr:     err,
+		install: func(ctx context.Context) (string, error) {
+			info, err := llama.InstallReleaseForAutoUpdate(ctx, latest, nil)
+			if err != nil {
+				return "", err
+			}
+			return info.TagName, nil
+		},
+	})
+}
+
+// autoUpdateSwiftLM runs the SwiftLM auto-update check + install. Gated on
+// the platform via swiftlm.NewerVersionAvailable returning nil on hosts
+// SwiftLM doesn't support. See autoUpdateLlamaCpp for the design note.
+//
+//nolint:dupl // backend-identity repetition; see autoUpdateLlamaCpp.
+func (s *Server) autoUpdateSwiftLM(ctx context.Context) {
+	latest, installed, err := swiftlm.NewerVersionAvailable()
+	installedTag, latestTag := "", ""
+	if installed != nil {
+		installedTag = installed.TagName
+	}
+	if latest != nil {
+		latestTag = latest.TagName
+	}
+	runBackendAutoUpdate(ctx, autoUpdateCheck{
+		name:         "SwiftLM",
+		enabled:      s.appConfig != nil && s.appConfig.SwiftLM.AutoUpdateEnabled(),
+		installedTag: installedTag,
+		latestTag:    latestTag,
+		haveLatest:   latest != nil,
+		checkErr:     err,
+		install: func(ctx context.Context) (string, error) {
+			info, err := swiftlm.InstallReleaseForAutoUpdate(ctx, latest, nil)
+			if err != nil {
+				return "", err
+			}
+			return info.TagName, nil
+		},
+	})
 }
 
 // Stop gracefully stops the proxy server

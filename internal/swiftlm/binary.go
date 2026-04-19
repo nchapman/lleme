@@ -113,7 +113,7 @@ func FindAssetForPlatform(release *binaryrelease.Release) (string, string, error
 type StatusFunc func(message string)
 
 // InstallLatest downloads and installs the latest SwiftLM release, swapping
-// the swiftlm-current symlink and pruning prior versions.
+// the swiftlm-current symlink and pruning all prior versions.
 func InstallLatest(status StatusFunc) (*VersionInfo, error) {
 	if !IsSupported() {
 		return nil, UnsupportedPlatformError{}
@@ -122,10 +122,48 @@ func InstallLatest(status StatusFunc) (*VersionInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get latest release: %w", err)
 	}
-	return installRelease(context.Background(), release, status)
+	return installRelease(context.Background(), release, status, 0)
 }
 
-func installRelease(ctx context.Context, release *binaryrelease.Release, status StatusFunc) (*VersionInfo, error) {
+// InstallReleaseForAutoUpdate installs a pre-fetched release and retains the
+// two most recent prior versions. Used by the background auto-update path:
+// while SwiftLM doesn't dlopen GPU plugins the way llama.cpp does, a
+// backend forked just before the symlink swap may still hold its binary
+// open via exec mapping; keeping recent predecessors on disk means rollback
+// or debugging has something to reach for. Older versions are pruned on
+// subsequent installs. The context bounds the download so proxy shutdown
+// can abort a long-running fetch.
+func InstallReleaseForAutoUpdate(ctx context.Context, release *binaryrelease.Release, status StatusFunc) (*VersionInfo, error) {
+	return installRelease(ctx, release, status, 2)
+}
+
+// NewerVersionAvailable returns the latest SwiftLM release when it differs
+// from what is installed, or nil when we're already current. Returns nil
+// when SwiftLM is not yet installed — the background auto-update path does
+// not bootstrap fresh installs. Also nil on unsupported platforms so the
+// caller can skip cleanly without branching on IsSupported() first.
+func NewerVersionAvailable() (*binaryrelease.Release, *VersionInfo, error) {
+	if !IsSupported() {
+		return nil, nil, nil
+	}
+	installed, err := GetInstalledVersion()
+	if err != nil {
+		return nil, nil, fmt.Errorf("read installed version: %w", err)
+	}
+	if installed == nil {
+		return nil, nil, nil
+	}
+	latest, err := GetLatestVersion()
+	if err != nil {
+		return nil, installed, fmt.Errorf("fetch latest release: %w", err)
+	}
+	if latest.TagName == installed.TagName {
+		return nil, installed, nil
+	}
+	return latest, installed, nil
+}
+
+func installRelease(ctx context.Context, release *binaryrelease.Release, status StatusFunc, keepPrior int) (*VersionInfo, error) {
 	downloadURL, assetName, err := FindAssetForPlatform(release)
 	if err != nil {
 		return nil, err
@@ -156,7 +194,7 @@ func installRelease(ctx context.Context, release *binaryrelease.Release, status 
 		return nil, fmt.Errorf("failed to extract archive: %w", err)
 	}
 
-	pruneOldVersions(binDir, release.TagName)
+	pruneOldVersions(binDir, release.TagName, keepPrior)
 
 	binPath := filepath.Join(binDir, currentLinkName, "SwiftLM")
 	info := &VersionInfo{
@@ -216,11 +254,13 @@ func extractTarGz(archivePath, destDir, tagName string) error {
 	return binaryrelease.SwapCurrentSymlink(destDir, currentLinkName, versionDir)
 }
 
-// pruneOldVersions removes swiftlm-b* directories other than the current one
-// and whatever the symlink actually resolves to. SwiftLM doesn't dlopen GPU
-// backend plugins the way llama.cpp does, so we don't need to keep prior
-// versions alive for in-flight processes.
-func pruneOldVersions(binDir, currentTag string) {
+// pruneOldVersions removes SwiftLM-b* directories other than (a) the one
+// named by currentTag, (b) whatever the swiftlm-current symlink actually
+// resolves to, and (c) the keepPrior most-recent of the rest, ordered by
+// mtime. keepPrior=0 means only the current version survives — today's
+// InstallLatest behavior. Auto-update uses keepPrior=2 as insurance for
+// backends forked just before the symlink swap.
+func pruneOldVersions(binDir, currentTag string, keepPrior int) {
 	spare := map[string]bool{versionedDirName(currentTag): true}
 	if target, err := os.Readlink(filepath.Join(binDir, currentLinkName)); err == nil {
 		spare[filepath.Base(target)] = true
@@ -253,8 +293,12 @@ func pruneOldVersions(binDir, currentTag string) {
 		prior = append(prior, candidate{name: name, mtime: info.ModTime()})
 	}
 
+	// Newest-first so the first keepPrior entries are retained.
 	sort.Slice(prior, func(i, j int) bool { return prior[i].mtime.After(prior[j].mtime) })
-	for _, c := range prior {
+	for i, c := range prior {
+		if i < keepPrior {
+			continue
+		}
 		os.RemoveAll(filepath.Join(binDir, c.name))
 	}
 }

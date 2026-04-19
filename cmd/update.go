@@ -6,13 +6,14 @@ import (
 	"github.com/nchapman/lleme/internal/llama"
 	"github.com/nchapman/lleme/internal/proxy"
 	"github.com/nchapman/lleme/internal/selfupdate"
+	"github.com/nchapman/lleme/internal/swiftlm"
 	"github.com/nchapman/lleme/internal/ui"
 	"github.com/spf13/cobra"
 )
 
 var updateCmd = &cobra.Command{
 	Use:     "update",
-	Short:   "Update lleme and/or llama.cpp",
+	Short:   "Update lleme and/or backend runtimes",
 	GroupID: "config",
 	Run:     runUpdateAll,
 }
@@ -21,6 +22,12 @@ var updateLlamaCmd = &cobra.Command{
 	Use:   "llama.cpp",
 	Short: "Update llama.cpp to the latest version",
 	Run:   runUpdateLlama,
+}
+
+var updateSwiftLMCmd = &cobra.Command{
+	Use:   "swiftlm",
+	Short: "Update SwiftLM to the latest version (macOS Apple Silicon only)",
+	Run:   runUpdateSwiftLM,
 }
 
 var updateSelfCmd = &cobra.Command{
@@ -36,6 +43,7 @@ func init() {
 
 	rootCmd.AddCommand(updateCmd)
 	updateCmd.AddCommand(updateLlamaCmd)
+	updateCmd.AddCommand(updateSwiftLMCmd)
 	updateCmd.AddCommand(updateSelfCmd)
 }
 
@@ -43,70 +51,138 @@ func runUpdateAll(cmd *cobra.Command, args []string) {
 	fmt.Println("Checking for updates...")
 	fmt.Println()
 
-	// Check lleme version
-	llemeInstalled := selfupdate.GetInstalledVersion()
-	llemeLatest, llemeErr := selfupdate.GetLatestVersion()
-	llemeNeedsUpdate := llemeErr == nil && llemeInstalled != llemeLatest
+	checks := collectUpdateChecks()
+	renderUpdateChecks(checks)
 
-	// Check llama.cpp version
-	llamaInstalled, llamaErr := llama.GetInstalledVersion()
-	llamaRelease, llamaFetchErr := llama.GetLatestVersion()
-
-	llamaInstalledStr := "Not installed"
-	if llamaInstalled != nil {
-		llamaInstalledStr = llamaInstalled.TagName
+	var updates []string
+	for _, c := range checks {
+		if c.needsUpdate {
+			updates = append(updates, fmt.Sprintf("%s to %s", c.name, c.latestStr))
+		}
 	}
-
-	llamaLatestStr := "Unknown"
-	if llamaRelease != nil {
-		llamaLatestStr = llamaRelease.TagName
-	}
-
-	llamaNeedsUpdate := llamaUpdateAvailable(llamaInstalled, llamaRelease, llamaFetchErr)
-
-	// Display status
-	printComponentStatus("lleme", llemeInstalled, llemeLatest, llemeErr, llemeNeedsUpdate)
-	printComponentStatus("llama.cpp", llamaInstalledStr, llamaLatestStr, llamaFetchErr, llamaNeedsUpdate)
-
-	if llamaErr != nil {
-		ui.PrintError("Failed to check llama.cpp installed version: %v", llamaErr)
-	}
-
-	if !llemeNeedsUpdate && !llamaNeedsUpdate {
+	if len(updates) == 0 {
 		fmt.Println("Everything is up to date")
 		return
 	}
 
-	// Build update message
-	var updates []string
-	if llemeNeedsUpdate {
-		updates = append(updates, fmt.Sprintf("lleme to %s", llemeLatest))
-	}
-	if llamaNeedsUpdate {
-		updates = append(updates, fmt.Sprintf("llama.cpp to %s", llamaLatestStr))
-	}
-
 	if !forceUpdate {
-		prompt := fmt.Sprintf("Update %s?", joinWithAnd(updates))
-		if !ui.PromptYesNo(prompt, false) {
+		if !ui.PromptYesNo(fmt.Sprintf("Update %s?", joinWithAnd(updates)), false) {
 			fmt.Println(ui.Muted("Cancelled"))
 			return
 		}
 	}
 	fmt.Println()
 
-	// Update lleme if needed
-	if llemeNeedsUpdate {
-		updateLleme(selfupdate.DetectInstallMethod())
+	for _, c := range checks {
+		if !c.needsUpdate {
+			continue
+		}
+		c.apply()
 		fmt.Println()
 	}
 
-	// Update llama.cpp if needed
-	if llamaNeedsUpdate {
-		updateLlamaCpp()
-	}
-
 	restartServerIfRunning()
+}
+
+// updateCheck bundles everything runUpdateAll needs about one component
+// (lleme / llama.cpp / SwiftLM) in a single shape, so the main flow stays
+// declarative and doesn't branch per component.
+type updateCheck struct {
+	name         string
+	installedStr string
+	latestStr    string
+	fetchErr     error
+	readErr      error // surfaced after status rendering
+	needsUpdate  bool
+	skipStatus   bool   // SwiftLM on unsupported platforms
+	readErrLabel string // what to say when readErr != nil
+	apply        func()
+}
+
+func collectUpdateChecks() []updateCheck {
+	return []updateCheck{
+		checkLlemeUpdate(),
+		checkLlamaCppUpdate(),
+		checkSwiftLMUpdate(),
+	}
+}
+
+func renderUpdateChecks(checks []updateCheck) {
+	for _, c := range checks {
+		if c.skipStatus {
+			continue
+		}
+		printComponentStatus(c.name, c.installedStr, c.latestStr, c.fetchErr, c.needsUpdate)
+	}
+	for _, c := range checks {
+		if c.readErr != nil && c.readErrLabel != "" {
+			ui.PrintError("%s: %v", c.readErrLabel, c.readErr)
+		}
+	}
+}
+
+func checkLlemeUpdate() updateCheck {
+	installed := selfupdate.GetInstalledVersion()
+	latest, err := selfupdate.GetLatestVersion()
+	needs := err == nil && installed != latest
+	return updateCheck{
+		name:         "lleme",
+		installedStr: installed,
+		latestStr:    latest,
+		fetchErr:     err,
+		needsUpdate:  needs,
+		apply:        func() { updateLleme(selfupdate.DetectInstallMethod()) },
+	}
+}
+
+func checkLlamaCppUpdate() updateCheck {
+	installed, readErr := llama.GetInstalledVersion()
+	release, fetchErr := llama.GetLatestVersion()
+	installedStr := "Not installed"
+	if installed != nil {
+		installedStr = installed.TagName
+	}
+	latestStr := "Unknown"
+	if release != nil {
+		latestStr = release.TagName
+	}
+	return updateCheck{
+		name:         "llama.cpp",
+		installedStr: installedStr,
+		latestStr:    latestStr,
+		fetchErr:     fetchErr,
+		readErr:      readErr,
+		readErrLabel: "Failed to check llama.cpp installed version",
+		needsUpdate:  llamaUpdateAvailable(installed, release, fetchErr),
+		apply:        updateLlamaCpp,
+	}
+}
+
+func checkSwiftLMUpdate() updateCheck {
+	if !swiftlm.IsSupported() {
+		return updateCheck{name: "SwiftLM", skipStatus: true}
+	}
+	installed, readErr := swiftlm.GetInstalledVersion()
+	release, fetchErr := swiftlm.GetLatestVersion()
+	installedStr := "Not installed"
+	if installed != nil {
+		installedStr = installed.TagName
+	}
+	latestStr := "Unknown"
+	if release != nil {
+		latestStr = release.TagName
+	}
+	needs := fetchErr == nil && release != nil && (installed == nil || installed.TagName != release.TagName)
+	return updateCheck{
+		name:         "SwiftLM",
+		installedStr: installedStr,
+		latestStr:    latestStr,
+		fetchErr:     fetchErr,
+		readErr:      readErr,
+		readErrLabel: "Failed to check SwiftLM installed version",
+		needsUpdate:  needs,
+		apply:        updateSwiftLM,
+	}
 }
 
 func llamaUpdateAvailable(installed *llama.VersionInfo, latest *llama.Release, fetchErr error) bool {
@@ -169,6 +245,49 @@ func runUpdateLlama(cmd *cobra.Command, args []string) {
 	restartServerIfRunning()
 }
 
+func runUpdateSwiftLM(cmd *cobra.Command, args []string) {
+	if !swiftlm.IsSupported() {
+		ui.Fatal("SwiftLM (MLX) requires macOS on Apple Silicon")
+	}
+	fmt.Println("Checking for SwiftLM updates...")
+	fmt.Println()
+
+	installed, err := swiftlm.GetInstalledVersion()
+	if err != nil {
+		ui.Fatal("Failed to check installed version: %v", err)
+	}
+
+	release, err := swiftlm.GetLatestVersion()
+	if err != nil {
+		ui.Fatal("Failed to get latest release: %v", err)
+	}
+
+	currentVersion := "Not installed"
+	if installed != nil {
+		currentVersion = installed.TagName
+	}
+
+	fmt.Printf("  %-12s %s\n", "Installed", currentVersion)
+	fmt.Printf("  %-12s %s\n", "Available", release.TagName)
+	fmt.Println()
+
+	if installed != nil && installed.TagName == release.TagName {
+		fmt.Println("SwiftLM is already up to date")
+		return
+	}
+
+	if !forceUpdate {
+		if !ui.PromptYesNo(fmt.Sprintf("Update to %s?", release.TagName), false) {
+			fmt.Println(ui.Muted("Cancelled"))
+			return
+		}
+	}
+
+	fmt.Println()
+	updateSwiftLM()
+	restartServerIfRunning()
+}
+
 func runUpdateSelf(cmd *cobra.Command, args []string) {
 	fmt.Println("Checking for lleme updates...")
 	fmt.Println()
@@ -225,6 +344,14 @@ func updateLlamaCpp() {
 		ui.Fatal("Failed to install llama.cpp: %v", err)
 	}
 	fmt.Printf("Updated to llama.cpp %s\n", version.TagName)
+}
+
+func updateSwiftLM() {
+	version, err := swiftlm.InstallLatest(func(msg string) { fmt.Println(msg) })
+	if err != nil {
+		ui.Fatal("Failed to install SwiftLM: %v", err)
+	}
+	fmt.Printf("Updated to SwiftLM %s\n", version.TagName)
 }
 
 func joinWithAnd(items []string) string {
