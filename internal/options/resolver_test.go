@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/nchapman/lleme/internal/config"
+	"github.com/nchapman/lleme/internal/hf"
 	"github.com/nchapman/lleme/internal/presets"
 )
 
@@ -323,6 +324,53 @@ func TestWithSourceReportsCorrectLayer(t *testing.T) {
 		v, source := r.GetConfigFloatWithSource("nope")
 		if v != 0 || source != "" {
 			t.Errorf("got (%v, %q), want (0, \"\")", v, source)
+		}
+	})
+}
+
+// The config layer is backend-scoped: an MLX resolver reads swiftlm.options,
+// a gguf resolver reads llamacpp.options, and neither cross-reads. Guards
+// against regressions to the pre-fix behavior where llamacpp.options always
+// won the config layer for both backends.
+func TestResolver_ConfigLayerBackendScoped(t *testing.T) {
+	cfg := &config.Config{
+		LlamaCpp: config.LlamaCpp{Options: map[string]any{"temp": 0.1}},
+		SwiftLM:  config.SwiftLM{Options: map[string]any{"temp": 0.9}},
+	}
+
+	t.Run("mlx reads swiftlm.options", func(t *testing.T) {
+		r := NewResolver(nil, cfg, nil).WithBackendKind(hf.BackendMLX)
+		v, source := r.GetConfigFloatWithSource("temp")
+		if v != 0.9 || source != "config" {
+			t.Errorf("mlx got (%v, %q), want (0.9, \"config\")", v, source)
+		}
+	})
+
+	t.Run("gguf reads llamacpp.options", func(t *testing.T) {
+		r := NewResolver(nil, cfg, nil).WithBackendKind(hf.BackendGGUF)
+		v, source := r.GetConfigFloatWithSource("temp")
+		if v != 0.1 || source != "config" {
+			t.Errorf("gguf got (%v, %q), want (0.1, \"config\")", v, source)
+		}
+	})
+
+	t.Run("empty kind defaults to llamacpp (legacy callers)", func(t *testing.T) {
+		r := NewResolver(nil, cfg, nil)
+		v, source := r.GetConfigFloatWithSource("temp")
+		if v != 0.1 || source != "config" {
+			t.Errorf("legacy got (%v, %q), want (0.1, \"config\")", v, source)
+		}
+	})
+
+	t.Run("mlx does not cross-read llamacpp when swiftlm missing key", func(t *testing.T) {
+		mlxOnly := &config.Config{
+			LlamaCpp: config.LlamaCpp{Options: map[string]any{"temp": 0.1}},
+			SwiftLM:  config.SwiftLM{Options: map[string]any{}},
+		}
+		r := NewResolver(nil, mlxOnly, nil).WithBackendKind(hf.BackendMLX)
+		v, source := r.GetConfigFloatWithSource("temp")
+		if v != 0 || source != "" {
+			t.Errorf("mlx must not cross-read: got (%v, %q), want (0, \"\")", v, source)
 		}
 	})
 }

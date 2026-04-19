@@ -320,6 +320,17 @@ func (c *LlamaCpp) GetOption(key string) (any, bool) {
 	return val, ok
 }
 
+// GetOption returns a SwiftLM option value from the config.
+// Mirrors LlamaCpp.GetOption so the options.Resolver can dispatch by
+// backend kind without peeking at field names.
+func (c *SwiftLM) GetOption(key string) (any, bool) {
+	if c.Options == nil {
+		return nil, false
+	}
+	val, ok := c.Options[key]
+	return val, ok
+}
+
 func EnsureDirectories() error {
 	dirs := []string{
 		ConfigPath(),

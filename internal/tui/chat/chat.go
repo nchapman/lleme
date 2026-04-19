@@ -134,7 +134,7 @@ func New(api *server.APIClient, modelName string, cfg *config.Config, persona *c
 		persona:     persona,
 		preset:      preset,
 		personaName: personaName,
-		resolver:    options.NewResolver(persona, cfg, preset),
+		resolver:    options.NewResolver(persona, cfg, preset).WithBackendKind(hf.BackendKindForModelName(modelName)),
 
 		chatMessages: []server.ChatMessage{},
 		keys:         DefaultKeyMap(),
