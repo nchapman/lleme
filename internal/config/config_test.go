@@ -22,9 +22,6 @@ func TestDefaultConfig(t *testing.T) {
 	}
 
 	// LlamaCpp defaults - should be empty (let llama-server use its defaults)
-	if cfg.LlamaCpp.ServerPath != "" {
-		t.Errorf("Expected empty LlamaCpp.ServerPath, got %s", cfg.LlamaCpp.ServerPath)
-	}
 	if cfg.LlamaCpp.Options != nil {
 		t.Errorf("Expected nil LlamaCpp.Options, got %v", cfg.LlamaCpp.Options)
 	}
@@ -73,7 +70,6 @@ func TestLoad(t *testing.T) {
   token: test-token
   default_quant: Q5_K
 llamacpp:
-  server_path: /custom/path
   options:
     ctx-size: 2048
     gpu-layers: 35
@@ -103,12 +99,7 @@ server:
 			t.Errorf("Expected HuggingFace.DefaultQuant Q5_K, got %s", cfg.HuggingFace.DefaultQuant)
 		}
 
-		// LlamaCpp
-		if cfg.LlamaCpp.ServerPath != "/custom/path" {
-			t.Errorf("Expected LlamaCpp.ServerPath /custom/path, got %s", cfg.LlamaCpp.ServerPath)
-		}
-
-		// Options
+		// LlamaCpp Options
 		if v, ok := cfg.LlamaCpp.GetOption("ctx-size"); !ok || v != 2048 {
 			t.Errorf("Expected ctx-size 2048, got %v (ok=%v)", v, ok)
 		}

@@ -56,7 +56,6 @@ type HuggingFace struct {
 }
 
 type LlamaCpp struct {
-	ServerPath string         `yaml:"server_path,omitempty"`
 	AutoUpdate *bool          `yaml:"auto_update,omitempty"`
 	Options    map[string]any `yaml:"options,omitempty"`
 }
@@ -202,9 +201,6 @@ server:
 # All options here are passed directly to llama-server.
 # See 'llama-server --help' for the full list.
 llamacpp:
-  # Path to llama-server binary (empty = auto-detect)
-  # server_path: ""
-
   # Auto-update llama.cpp in the background on server start (default: true)
   # llama.cpp ships frequently; newer builds fix issues with newly released
   # models. Disable if you want to pin a known-good version.
