@@ -7,26 +7,39 @@ package proxy
 //
 // Scope for this pass:
 //   - Text content: full support (string or array of {type:"text", text:...}).
-//   - Image content: full support (base64 → OpenAI data URL; accepted media
-//     types restricted to Anthropic's documented set).
+//   - Image content: base64 (media_type restricted to Anthropic's accepted set)
+//     and url sources both supported.
 //   - Tool calling (request-level tools/tool_choice, plus tool_use and
 //     tool_result content blocks): rejected with a 400 because the two APIs
 //     disagree enough that a partial translation would silently misbehave.
-//     Will revisit when SwiftLM's tool-calling story firms up.
-//   - Non-text content blocks (document, thinking, redacted_thinking, etc.)
-//     rejected with a 400.
+//     Will revisit when SwiftLM's tool-calling story firms up. Reference
+//     implementation: llama.cpp's tools/server/server-common.cpp
+//     convert_anthropic_to_oai() shows the full mapping (tool_use →
+//     tool_calls, tool_result → role:tool, tool_choice {auto|any|tool} →
+//     {auto|required|{name:...}}).
+//   - Extended-thinking blocks (thinking, redacted_thinking) and document
+//     blocks: rejected with a 400. llama.cpp forwards thinking as
+//     reasoning_content on the OpenAI side and emits signature_delta on
+//     the Anthropic side — worth adopting once SwiftLM's thinking story is
+//     clear.
 //
 // Known limitations relative to Anthropic's public spec (by design for now):
 //   - message_start.usage.input_tokens is always 0 in streamed responses.
 //     OpenAI with stream_options.include_usage only reports prompt_tokens in
 //     the final chunk; backfilling message_start would require buffering the
-//     entire stream and break TTFT. Documented, tested.
+//     entire stream and break TTFT. llama.cpp cheats by pre-tokenizing on
+//     the same process — we can't, without a separate tokenize round-trip.
 //   - stop_reason is never "stop_sequence" because OpenAI does not report
 //     which stop string matched. We map finish_reason="stop" to "end_turn".
 //   - OpenAI finish_reason="content_filter" maps to "end_turn" — Anthropic
 //     has no direct analog in the stop_reason enum.
 //   - Periodic ping events are not emitted; intermediaries that idle-close
 //     SSE connections may drop very long streams.
+//   - cache_creation_input_tokens / cache_read_input_tokens are not emitted.
+//     Requires backend-side prompt-cache tracking we don't currently have.
+//   - count_tokens is a char-ratio approximation, not a real tokenize call.
+//     llama.cpp runs the actual tokenizer in-process; our proxy would need
+//     a backend round-trip (or to load a tokenizer) for parity.
 //   - The anthropic-version request header is not enforced (local proxy).
 //   - Forward-compat: unknown top-level fields (service_tier, container,
 //     thinking, output_config, etc.) and cache_control hints on supported
@@ -72,9 +85,10 @@ type anthropicContentBlock struct {
 }
 
 type anthropicImageSource struct {
-	Type      string `json:"type"`       // "base64"
-	MediaType string `json:"media_type"` // e.g. "image/png"
-	Data      string `json:"data"`
+	Type      string `json:"type"`                 // "base64" | "url"
+	MediaType string `json:"media_type,omitempty"` // for base64 (e.g. "image/png")
+	Data      string `json:"data,omitempty"`       // for base64
+	URL       string `json:"url,omitempty"`        // for url
 }
 
 type anthropicMessagesResponse struct {
@@ -338,16 +352,27 @@ func translateAnthropicMessage(m anthropicMessage) (openAIMessage, error) {
 		case "text":
 			parts = append(parts, openAIContentPart{Type: "text", Text: b.Text})
 		case "image":
-			if b.Source == nil || b.Source.Type != "base64" {
-				return openAIMessage{}, fmt.Errorf("image: only base64 sources are supported")
+			if b.Source == nil {
+				return openAIMessage{}, fmt.Errorf("image: missing source")
 			}
-			if !allowedImageMediaTypes[b.Source.MediaType] {
-				return openAIMessage{}, fmt.Errorf("image: unsupported media_type %q", b.Source.MediaType)
+			var imageURL string
+			switch b.Source.Type {
+			case "base64":
+				if !allowedImageMediaTypes[b.Source.MediaType] {
+					return openAIMessage{}, fmt.Errorf("image: unsupported media_type %q", b.Source.MediaType)
+				}
+				imageURL = fmt.Sprintf("data:%s;base64,%s", b.Source.MediaType, b.Source.Data)
+			case "url":
+				if b.Source.URL == "" {
+					return openAIMessage{}, fmt.Errorf("image: url source missing url")
+				}
+				imageURL = b.Source.URL
+			default:
+				return openAIMessage{}, fmt.Errorf("image: unsupported source type %q", b.Source.Type)
 			}
-			url := fmt.Sprintf("data:%s;base64,%s", b.Source.MediaType, b.Source.Data)
 			parts = append(parts, openAIContentPart{
 				Type:     "image_url",
-				ImageURL: &openAIImageURL{URL: url},
+				ImageURL: &openAIImageURL{URL: imageURL},
 			})
 		case "tool_use", "tool_result":
 			return openAIMessage{}, fmt.Errorf("%s content blocks are not yet supported", b.Type)

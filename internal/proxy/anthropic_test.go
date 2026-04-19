@@ -798,10 +798,10 @@ func TestTranslateAnthropicRequest_ThinkingBlockRejected(t *testing.T) {
 	}
 }
 
-// Vision URL sources aren't yet supported (only base64). Ensure clients
-// passing {type:"url", url:"..."} get a clear error rather than silent
-// malformation.
-func TestTranslateAnthropicRequest_ImageURLSourceRejected(t *testing.T) {
+// Anthropic supports `source.type: "url"` for images (added 2024); llama.cpp
+// passes the URL through verbatim. We do the same — no download, no
+// validation; let the backend fetch.
+func TestTranslateAnthropicRequest_ImageURLSourcePassthrough(t *testing.T) {
 	in := []byte(`{
 		"model": "m",
 		"max_tokens": 5,
@@ -812,13 +812,38 @@ func TestTranslateAnthropicRequest_ImageURLSourceRejected(t *testing.T) {
 			]
 		}]
 	}`)
+	out, _, err := translateAnthropicRequest(in)
+	if err != nil {
+		t.Fatalf("url image should be accepted, got: %v", err)
+	}
+	var got openAIChatRequest
+	_ = json.Unmarshal(out, &got)
+	var parts []openAIContentPart
+	_ = json.Unmarshal(got.Messages[0].Content, &parts)
+	if len(parts) != 1 || parts[0].ImageURL == nil {
+		t.Fatalf("expected one image_url part; got %+v", parts)
+	}
+	if parts[0].ImageURL.URL != "https://example.com/x.png" {
+		t.Errorf("image url = %q, want passthrough", parts[0].ImageURL.URL)
+	}
+}
+
+// A url-source block without a url should still produce a clear 400.
+func TestTranslateAnthropicRequest_ImageURLSourceMissingURL(t *testing.T) {
+	in := []byte(`{
+		"model": "m",
+		"max_tokens": 5,
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "image", "source": {"type": "url"}}
+			]
+		}]
+	}`)
 	_, _, err := translateAnthropicRequest(in)
 	var te *translateError
 	if !errors.As(err, &te) || te.status != 400 {
 		t.Fatalf("got err %v, want 400", err)
-	}
-	if !strings.Contains(te.msg, "base64") {
-		t.Errorf("error message should mention base64: %q", te.msg)
 	}
 }
 
