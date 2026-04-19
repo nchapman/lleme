@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nchapman/lleme/internal/config"
+	"github.com/nchapman/lleme/internal/fileutil"
 	"github.com/nchapman/lleme/internal/version"
 )
 
@@ -173,7 +174,7 @@ func FindAssetForPlatform(release *Release) (string, string, error) {
 func DownloadBinary(downloadURL, destPath string, progress func(int64, int64)) error {
 	req, err := http.NewRequest("GET", downloadURL, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("build request: %w", err)
 	}
 
 	req.Header.Set("User-Agent", version.UserAgent())
@@ -185,57 +186,36 @@ func DownloadBinary(downloadURL, destPath string, progress func(int64, int64)) e
 	client := &http.Client{Transport: transport}
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("download %s: %w", downloadURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
+		return fmt.Errorf("download %s: HTTP %d", downloadURL, resp.StatusCode)
 	}
 
 	tmpPath := destPath + ".partial"
 	out, err := os.Create(tmpPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("create %s: %w", tmpPath, err)
 	}
 	defer out.Close()
 
-	size := resp.ContentLength
-	written := int64(0)
-	buf := make([]byte, 32*1024)
-
-	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			if _, werr := out.Write(buf[:n]); werr != nil {
-				return werr
-			}
-			written += int64(n)
-			if progress != nil {
-				progress(written, size)
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
+	if _, err := fileutil.StreamBody(resp.Body, out, 0, resp.ContentLength, progress); err != nil {
+		return fmt.Errorf("write binary to %s: %w", tmpPath, err)
 	}
-
 	out.Close()
 
 	if err := os.Rename(tmpPath, destPath); err != nil {
-		return err
+		return fmt.Errorf("rename %s to %s: %w", tmpPath, destPath, err)
 	}
-
 	return nil
 }
 
 func extractTarGz(archivePath, destDir, tagName string) error {
 	cmd := exec.Command("tar", "-xzf", archivePath, "-C", destDir)
 	if err := cmd.Run(); err != nil {
-		return err
+		return fmt.Errorf("extract %s: %w", archivePath, err)
 	}
 
 	llamaDirName := "llama-" + tagName
@@ -361,10 +341,6 @@ func SaveVersionInfo(version *VersionInfo) error {
 	}
 
 	return os.WriteFile(versionPath, data, 0644)
-}
-
-func BinaryPath() string {
-	return filepath.Join(config.BinPath(), "llama-current", "llama-cli")
 }
 
 func ServerPath() string {

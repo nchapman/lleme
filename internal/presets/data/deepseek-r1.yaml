@@ -1,0 +1,8 @@
+name: DeepSeek-R1
+source: https://unsloth.ai/docs/models/tutorials/deepseek-r1-how-to-run-locally.md
+match:
+  - "*/DeepSeek-R1-*"
+  - "*/DeepSeek-R1"
+options:
+  temp: 0.6
+  min-p: 0.05

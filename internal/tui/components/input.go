@@ -31,11 +31,6 @@ type Input struct {
 	setOptionItems []Completion // Available /set option completions
 }
 
-// NewInput creates a new input component
-func NewInput() Input {
-	return NewInputWithCompletions(nil, nil)
-}
-
 // NewInputWithCompletions creates a new input component with command completions
 func NewInputWithCompletions(cmdItems, setOptionItems []Completion) Input {
 	ta := textarea.New()
@@ -68,49 +63,17 @@ func (i Input) Init() tea.Cmd {
 func (i Input) Update(msg tea.Msg) (Input, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// Handle completions navigation when open
 		if i.completions != nil && i.completions.IsOpen() {
-			switch msg.String() {
-			case "up":
-				i.completions.MoveUp()
-				return i, nil
-			case "down":
-				i.completions.MoveDown()
-				return i, nil
-			case "tab", "enter":
-				if sel := i.completions.Selected(); sel != nil {
-					var newValue string
-					if i.isSetOptionContext() {
-						newValue = "/set " + sel.Value + " "
-					} else {
-						newValue = sel.Value + " "
-					}
-					i.textarea.SetValue(newValue)
-					i.textarea.SetCursor(len(newValue))
-					i.completions.Close()
-					return i, func() tea.Msg {
-						return CompletionSelectedMsg{Value: sel.Value}
-					}
-				}
-				i.completions.Close()
-				return i, nil
-			case "esc":
-				i.completions.Close()
-				return i, nil
-			case " ":
-				// Space closes completions
-				i.completions.Close()
-				// Fall through to normal handling
+			if result, cmd, handled := i.handleCompletionsKey(msg); handled {
+				return result, cmd
 			}
 		}
 
 		switch msg.String() {
 		case "shift+enter", "ctrl+j":
-			// Insert newline
 			i.textarea.InsertRune('\n')
 			return i, i.checkHeightChange()
 		case "enter":
-			// Plain enter - let parent handle send
 			return i, nil
 		}
 	}
@@ -118,14 +81,46 @@ func (i Input) Update(msg tea.Msg) (Input, tea.Cmd) {
 	var cmd tea.Cmd
 	i.textarea, cmd = i.textarea.Update(msg)
 
-	// Check for slash command completions
 	i.updateCompletions()
 
-	// Check if we need to resize after update
 	if heightCmd := i.checkHeightChange(); heightCmd != nil {
 		return i, tea.Batch(cmd, heightCmd)
 	}
 	return i, cmd
+}
+
+func (i Input) handleCompletionsKey(msg tea.KeyMsg) (Input, tea.Cmd, bool) {
+	switch msg.String() {
+	case "up":
+		i.completions.MoveUp()
+		return i, nil, true
+	case "down":
+		i.completions.MoveDown()
+		return i, nil, true
+	case "tab", "enter":
+		if sel := i.completions.Selected(); sel != nil {
+			var newValue string
+			if i.isSetOptionContext() {
+				newValue = "/set " + sel.Value + " "
+			} else {
+				newValue = sel.Value + " "
+			}
+			i.textarea.SetValue(newValue)
+			i.textarea.SetCursor(len(newValue))
+			i.completions.Close()
+			return i, func() tea.Msg { return CompletionSelectedMsg{Value: sel.Value} }, true
+		}
+		i.completions.Close()
+		return i, nil, true
+	case "esc":
+		i.completions.Close()
+		return i, nil, true
+	case " ":
+		// Space closes completions and falls through to normal handling
+		i.completions.Close()
+		return i, nil, false
+	}
+	return i, nil, false
 }
 
 // checkHeightChange adjusts height based on line count and returns a command if changed

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"time"
 
 	"github.com/nchapman/lleme/internal/logs"
@@ -60,9 +61,15 @@ func (m *IdleMonitor) checkAndEvict() {
 		modelName := backend.ModelName
 		idleDuration := backend.IdleDuration()
 
-		logs.Info("Unloading idle model", "model", modelName, "idle", idleDuration.Round(time.Second))
-
-		if err := m.manager.StopBackend(modelName); err != nil {
+		// StopIfIdle re-checks the in-flight counter under m.mu so a request
+		// that arrived between GetIdleBackends and here isn't torn down.
+		err := m.manager.StopIfIdle(modelName)
+		switch {
+		case err == nil:
+			logs.Info("Unloaded idle model", "model", modelName, "idle", idleDuration.Round(time.Second))
+		case errors.Is(err, ErrBackendBusy):
+			logs.Debug("Skipping idle unload; request arrived", "model", modelName)
+		default:
 			logs.Warn("Failed to unload model", "model", modelName, "error", err)
 		}
 	}

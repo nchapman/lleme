@@ -396,134 +396,6 @@ func TestCleanupFilesSingleFiles(t *testing.T) {
 	}
 }
 
-func TestDownloadFilePeerSuccess(t *testing.T) {
-	tmpDir := t.TempDir()
-	destPath := filepath.Join(tmpDir, "model.gguf")
-
-	peerDownload := func(hash, dest string, size int64, progress func(int64, int64)) (bool, error) {
-		os.WriteFile(dest, []byte("peer content"), 0644)
-		if progress != nil {
-			progress(100, 100)
-		}
-		return true, nil
-	}
-
-	file := &ManifestFile{
-		RFilename: "model.gguf",
-		Size:      100,
-		LFS:       &ManifestLFS{SHA256: "abc123"},
-	}
-
-	fromPeer, err := downloadFile(nil, "user", "repo", file, destPath, peerDownload, nil)
-	if err != nil {
-		t.Fatalf("downloadFile() error = %v", err)
-	}
-	if !fromPeer {
-		t.Error("fromPeer should be true")
-	}
-	if _, err := os.Stat(destPath); err != nil {
-		t.Error("file should exist")
-	}
-}
-
-func TestDownloadFilePeerAttempted(t *testing.T) {
-	// Test that peer download is attempted when conditions are met
-	peerAttempted := false
-	peerDownload := func(hash, dest string, size int64, progress func(int64, int64)) (bool, error) {
-		peerAttempted = true
-		// Return true to avoid falling back to HF (which needs a real client)
-		os.WriteFile(dest, []byte("content"), 0644)
-		return true, nil
-	}
-
-	file := &ManifestFile{
-		RFilename: "model.gguf",
-		Size:      100,
-		LFS:       &ManifestLFS{SHA256: "abc123"},
-	}
-
-	tmpDir := t.TempDir()
-	destPath := filepath.Join(tmpDir, "model.gguf")
-
-	downloadFile(nil, "user", "repo", file, destPath, peerDownload, nil)
-	if !peerAttempted {
-		t.Error("peer download should be attempted when hash is available")
-	}
-}
-
-func TestDownloadFileSkipsPeerWithoutHash(t *testing.T) {
-	// Test that peer download is skipped when file has no LFS hash.
-	peerCalled := false
-	peerDownload := func(hash, dest string, size int64, progress func(int64, int64)) (bool, error) {
-		peerCalled = true
-		return true, nil
-	}
-
-	tests := []struct {
-		name string
-		file *ManifestFile
-	}{
-		{"nil LFS", &ManifestFile{RFilename: "model.gguf", Size: 100, LFS: nil}},
-		{"empty hash", &ManifestFile{RFilename: "model.gguf", Size: 100, LFS: &ManifestLFS{SHA256: ""}}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			peerCalled = false
-			tmpDir := t.TempDir()
-			destPath := filepath.Join(tmpDir, "model.gguf")
-
-			// downloadFile will skip peer (no hash), then fail on HF (nil client)
-			_, err := downloadFile(nil, "user", "repo", tt.file, destPath, peerDownload, nil)
-
-			// Should get an error about nil client (not panic)
-			if err == nil {
-				t.Error("expected error for nil client")
-			}
-			if peerCalled {
-				t.Error("peer download should not be called for files without hash")
-			}
-		})
-	}
-}
-
-func TestDownloadAllFilesWithPeer(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	peerDownload := func(hash, dest string, size int64, progress func(int64, int64)) (bool, error) {
-		if hash == "peer_hash" {
-			os.WriteFile(dest, []byte("peer content"), 0644)
-			if progress != nil {
-				progress(size, size)
-			}
-			return true, nil
-		}
-		return false, nil
-	}
-
-	files := []fileDownload{
-		{
-			file:     &ManifestFile{RFilename: "model1.gguf", Size: 100, LFS: &ManifestLFS{SHA256: "peer_hash"}},
-			destPath: filepath.Join(tmpDir, "model1.gguf"),
-		},
-	}
-
-	var progressCalls int
-	err := downloadAllFiles(nil, "user", "repo", files, peerDownload, 100, func(p PullProgress) {
-		progressCalls++
-	})
-
-	if err != nil {
-		t.Fatalf("downloadAllFiles() error = %v", err)
-	}
-	if !files[0].fromPeer {
-		t.Error("file should be marked as from peer")
-	}
-	if progressCalls == 0 {
-		t.Error("progress should be called")
-	}
-}
-
 func TestVerifyAllFilesSuccess(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -538,11 +410,10 @@ func TestVerifyAllFilesSuccess(t *testing.T) {
 		{
 			file:     &ManifestFile{RFilename: "model.gguf", Size: int64(len(content)), LFS: &ManifestLFS{SHA256: hash}},
 			destPath: testFile,
-			fromPeer: false,
 		},
 	}
 
-	err := verifyAllFiles(nil, "user", "repo", files, int64(len(content)), nil)
+	err := verifyAllFiles(files, int64(len(content)), nil)
 	if err != nil {
 		t.Fatalf("verifyAllFiles() error = %v", err)
 	}
@@ -558,11 +429,10 @@ func TestVerifyAllFilesHashMismatch(t *testing.T) {
 		{
 			file:     &ManifestFile{RFilename: "bad.gguf", Size: 11, LFS: &ManifestLFS{SHA256: "wrong_hash"}},
 			destPath: badFile,
-			fromPeer: false,
 		},
 	}
 
-	err := verifyAllFiles(nil, "user", "repo", files, 11, nil)
+	err := verifyAllFiles(files, 11, nil)
 	if err == nil {
 		t.Error("verifyAllFiles() should fail for wrong hash")
 	}
@@ -583,11 +453,10 @@ func TestVerifyAllFilesSkipsWithoutHash(t *testing.T) {
 		{
 			file:     &ManifestFile{RFilename: "nohash.gguf", Size: 7},
 			destPath: noHashFile,
-			fromPeer: false,
 		},
 	}
 
-	err := verifyAllFiles(nil, "user", "repo", files, 7, nil)
+	err := verifyAllFiles(files, 7, nil)
 	if err != nil {
 		t.Fatalf("verifyAllFiles() should not fail for files without hash: %v", err)
 	}
@@ -621,24 +490,6 @@ func TestGetOrFetchManifestRequiresClient(t *testing.T) {
 	_, _, err := getOrFetchManifest(nil, "user", "repo", Quantization{}, nil)
 	if err == nil {
 		t.Error("should error without client when no opts.Manifest provided")
-	}
-}
-
-func TestFileDownloadStruct(t *testing.T) {
-	fd := fileDownload{
-		file:     &ManifestFile{RFilename: "test.gguf", Size: 1000},
-		destPath: "/path/to/test.gguf",
-		fromPeer: true,
-	}
-
-	if fd.file.RFilename != "test.gguf" {
-		t.Error("file should be set")
-	}
-	if fd.destPath != "/path/to/test.gguf" {
-		t.Error("destPath should be set")
-	}
-	if !fd.fromPeer {
-		t.Error("fromPeer should be true")
 	}
 }
 

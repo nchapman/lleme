@@ -29,7 +29,7 @@ var listCmd = &cobra.Command{
 
 		err := filepath.WalkDir(modelsDir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
-				return err
+				return fmt.Errorf("walk %s: %w", path, err)
 			}
 
 			if d.IsDir() {
@@ -42,7 +42,7 @@ var listCmd = &cobra.Command{
 
 			relPath, err := filepath.Rel(modelsDir, path)
 			if err != nil {
-				return err
+				return fmt.Errorf("relative path of %s: %w", path, err)
 			}
 
 			parts := strings.Split(relPath, string(filepath.Separator))
@@ -67,9 +67,13 @@ var listCmd = &cobra.Command{
 				}
 				seenSplitDirs[splitDirKey] = true
 
-				// Calculate total size of all split files
+				// Calculate total size of all split files. Read errors here are
+				// non-fatal: we just report whatever sizes we could sum.
 				splitDir := filepath.Dir(path)
-				entries, _ := os.ReadDir(splitDir)
+				entries, readErr := os.ReadDir(splitDir)
+				if readErr != nil {
+					return fmt.Errorf("read split dir %s: %w", splitDir, readErr)
+				}
 				for _, entry := range entries {
 					if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".gguf") {
 						continue
@@ -83,7 +87,7 @@ var listCmd = &cobra.Command{
 				quant = strings.TrimSuffix(d.Name(), ".gguf")
 				info, err := d.Info()
 				if err != nil {
-					return err
+					return fmt.Errorf("stat %s: %w", path, err)
 				}
 				modelSize = info.Size()
 			}

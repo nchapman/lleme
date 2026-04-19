@@ -104,19 +104,14 @@ server:
 		}
 
 		// Options
-		ctxSize := cfg.LlamaCpp.GetIntOption("ctx-size", 0)
-		if ctxSize != 2048 {
-			t.Errorf("Expected ctx-size 2048, got %d", ctxSize)
+		if v, ok := cfg.LlamaCpp.GetOption("ctx-size"); !ok || v != 2048 {
+			t.Errorf("Expected ctx-size 2048, got %v (ok=%v)", v, ok)
 		}
-
-		gpuLayers := cfg.LlamaCpp.GetIntOption("gpu-layers", 0)
-		if gpuLayers != 35 {
-			t.Errorf("Expected gpu-layers 35, got %d", gpuLayers)
+		if v, ok := cfg.LlamaCpp.GetOption("gpu-layers"); !ok || v != 35 {
+			t.Errorf("Expected gpu-layers 35, got %v (ok=%v)", v, ok)
 		}
-
-		temp := cfg.LlamaCpp.GetFloatOption("temp", 0)
-		if temp != 0.8 {
-			t.Errorf("Expected temp 0.8, got %f", temp)
+		if v, ok := cfg.LlamaCpp.GetOption("temp"); !ok || v != 0.8 {
+			t.Errorf("Expected temp 0.8, got %v (ok=%v)", v, ok)
 		}
 
 		// Server
@@ -187,7 +182,7 @@ func TestSaveDefault(t *testing.T) {
 	}
 }
 
-func TestGetOptionHelpers(t *testing.T) {
+func TestGetOption(t *testing.T) {
 	llama := &LlamaCpp{
 		Options: map[string]any{
 			"ctx-size":   4096,
@@ -197,40 +192,98 @@ func TestGetOptionHelpers(t *testing.T) {
 		},
 	}
 
-	t.Run("GetIntOption", func(t *testing.T) {
-		if v := llama.GetIntOption("ctx-size", 0); v != 4096 {
-			t.Errorf("Expected 4096, got %d", v)
-		}
-		if v := llama.GetIntOption("gpu-layers", 0); v != -1 {
-			t.Errorf("Expected -1, got %d", v)
-		}
-		if v := llama.GetIntOption("nonexistent", 999); v != 999 {
-			t.Errorf("Expected default 999, got %d", v)
-		}
-	})
-
-	t.Run("GetFloatOption", func(t *testing.T) {
-		if v := llama.GetFloatOption("temp", 0); v != 0.7 {
-			t.Errorf("Expected 0.7, got %f", v)
-		}
-		if v := llama.GetFloatOption("nonexistent", 0.5); v != 0.5 {
-			t.Errorf("Expected default 0.5, got %f", v)
-		}
-	})
-
-	t.Run("GetOption", func(t *testing.T) {
+	t.Run("returns value and presence", func(t *testing.T) {
 		if v, ok := llama.GetOption("mlock"); !ok || v != true {
 			t.Errorf("Expected mlock=true, got %v, %v", v, ok)
 		}
+		if v, ok := llama.GetOption("ctx-size"); !ok || v != 4096 {
+			t.Errorf("Expected ctx-size=4096, got %v, %v", v, ok)
+		}
+	})
+
+	t.Run("missing key returns ok=false", func(t *testing.T) {
 		if _, ok := llama.GetOption("nonexistent"); ok {
 			t.Error("Expected nonexistent to not be found")
 		}
 	})
 
-	t.Run("nil options", func(t *testing.T) {
+	t.Run("nil options returns ok=false", func(t *testing.T) {
 		empty := &LlamaCpp{}
-		if v := empty.GetIntOption("ctx-size", 100); v != 100 {
-			t.Errorf("Expected default 100, got %d", v)
+		if _, ok := empty.GetOption("ctx-size"); ok {
+			t.Error("Expected ok=false on nil options")
+		}
+	})
+}
+
+func TestGetServerOptions(t *testing.T) {
+	t.Run("nil persona returns nil", func(t *testing.T) {
+		var p *Persona
+		if got := p.GetServerOptions(); got != nil {
+			t.Errorf("Expected nil, got %v", got)
+		}
+	})
+
+	t.Run("empty options returns nil", func(t *testing.T) {
+		p := &Persona{}
+		if got := p.GetServerOptions(); got != nil {
+			t.Errorf("Expected nil, got %v", got)
+		}
+	})
+
+	t.Run("returns all options without filtering", func(t *testing.T) {
+		p := &Persona{
+			Options: map[string]any{
+				"ctx-size":             4096,
+				"gpu-layers":           -1,
+				"temp":                 0.7,
+				"presence-penalty":     1.5,
+				"frequency-penalty":    0.2,
+				"chat-template-kwargs": `{"enable_thinking":false}`,
+				"dry-multiplier":       0.8,
+			},
+		}
+		got := p.GetServerOptions()
+		if got == nil {
+			t.Fatal("Expected non-nil options")
+		}
+		want := map[string]any{
+			"ctx-size":             4096,
+			"gpu-layers":           -1,
+			"temp":                 0.7,
+			"presence-penalty":     1.5,
+			"frequency-penalty":    0.2,
+			"chat-template-kwargs": `{"enable_thinking":false}`,
+			"dry-multiplier":       0.8,
+		}
+		for key, wantVal := range want {
+			gotVal, ok := got[key]
+			if !ok {
+				t.Errorf("Missing key %q in result", key)
+				continue
+			}
+			if gotVal != wantVal {
+				t.Errorf("Key %q: got %v, want %v", key, gotVal, wantVal)
+			}
+		}
+		if len(got) != len(want) {
+			t.Errorf("Expected %d keys, got %d", len(want), len(got))
+		}
+	})
+
+	t.Run("returns a copy, not the original map", func(t *testing.T) {
+		opts := map[string]any{"temp": 0.8}
+		p := &Persona{Options: opts}
+		got := p.GetServerOptions()
+		if got == nil {
+			t.Fatal("Expected non-nil options")
+		}
+		if len(got) != 1 {
+			t.Errorf("Expected 1 key, got %d", len(got))
+		}
+		// Mutating the returned map must not affect the persona's options.
+		got["injected"] = true
+		if _, ok := p.Options["injected"]; ok {
+			t.Error("Mutating returned map affected persona options — expected a copy")
 		}
 	})
 }

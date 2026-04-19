@@ -1,0 +1,9 @@
+name: Phi-4 Reasoning
+source: https://unsloth.ai/docs/models/tutorials/phi-4-reasoning-how-to-run-and-fine-tune.md
+match:
+  - "*/Phi-4-reasoning*"
+  - "*/Phi-4-mini-reasoning*"
+options:
+  temp: 0.8
+  top-p: 0.95
+  min-p: 0.0

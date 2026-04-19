@@ -12,7 +12,6 @@ import (
 
 	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/hf"
-	"github.com/nchapman/lleme/internal/peer"
 	"github.com/nchapman/lleme/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -69,7 +68,8 @@ Examples:
 			fmt.Println("  lleme remove user/repo:quant")
 			fmt.Println("  lleme remove --older-than 30d")
 			fmt.Println("  lleme remove --larger-than 10GB")
-			os.Exit(1)
+			ui.ExitFunc(1)
+			return
 		}
 
 		// Parse filters
@@ -176,13 +176,6 @@ Examples:
 			removed++
 		}
 
-		// Update peer sharing index
-		if removed > 0 {
-			if err := peer.RebuildPeerFileIndex(); err != nil {
-				ui.PrintError("Failed to update peer index: %v", err)
-			}
-		}
-
 		if removed == 1 {
 			m := models[0]
 			fmt.Printf("Removed %s\n", hf.FormatModelName(m.User, m.Repo, m.Quant))
@@ -199,118 +192,131 @@ func findModels(pattern string, olderThan time.Duration, largerThan int64) ([]Mo
 
 // findModelsInDir is the testable version of findModels
 func findModelsInDir(modelsDir, pattern string, olderThan time.Duration, largerThan int64) ([]ModelInfo, error) {
-	var models []ModelInfo
-	seenSplitDirs := make(map[string]bool)
-
-	// Convert glob pattern to regex
-	regexPattern := globToRegex(pattern)
-	re, err := regexp.Compile("^" + regexPattern + "$")
+	re, err := regexp.Compile("^" + globToRegex(pattern) + "$")
 	if err != nil {
 		return nil, fmt.Errorf("invalid pattern: %s", pattern)
 	}
 
-	err = filepath.WalkDir(modelsDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
+	w := &modelWalker{
+		modelsDir:  modelsDir,
+		re:         re,
+		olderThan:  olderThan,
+		largerThan: largerThan,
+		seen:       make(map[string]bool),
+	}
 
-		if d.IsDir() || filepath.Ext(d.Name()) != ".gguf" {
-			return nil
-		}
+	if err := filepath.WalkDir(modelsDir, w.walk); err != nil {
+		return nil, err
+	}
+	return w.models, nil
+}
 
-		relPath, err := filepath.Rel(modelsDir, path)
-		if err != nil {
-			return err
-		}
+type modelWalker struct {
+	modelsDir  string
+	re         *regexp.Regexp
+	olderThan  time.Duration
+	largerThan int64
+	seen       map[string]bool
+	models     []ModelInfo
+}
 
-		parts := strings.Split(relPath, string(filepath.Separator))
-		if len(parts) < 3 {
-			return nil
-		}
-
-		user := parts[0]
-		repo := parts[1]
-		var quant string
-		var modelSize int64
-
-		// Check if this is a split file (in a quant subdirectory)
-		// Structure: user/repo/quant/model-00001-of-NNNNN.gguf
-		if len(parts) == 4 && hf.SplitFilePattern.MatchString(d.Name()) {
-			quant = parts[2]
-			splitDirKey := filepath.Join(user, repo, quant)
-
-			// Only add the first split file we encounter for this quant
-			if seenSplitDirs[splitDirKey] {
-				return nil
-			}
-			seenSplitDirs[splitDirKey] = true
-
-			// Calculate total size of all split files
-			splitDir := filepath.Dir(path)
-			entries, _ := os.ReadDir(splitDir)
-			for _, entry := range entries {
-				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".gguf") {
-					continue
-				}
-				if info, err := entry.Info(); err == nil {
-					modelSize += info.Size()
-				}
-			}
-		} else {
-			// Standard single-file model: user/repo/quant.gguf
-			quant = strings.TrimSuffix(d.Name(), ".gguf")
-			info, err := d.Info()
-			if err != nil {
-				return err
-			}
-			modelSize = info.Size()
-		}
-
-		// Check pattern match
-		fullName := hf.FormatModelName(user, repo, quant)
-		repoName := fmt.Sprintf("%s/%s", user, repo)
-
-		// Try matching full name, repo name, or repo/* pattern
-		if !re.MatchString(fullName) && !re.MatchString(repoName) {
-			return nil
-		}
-
-		// Get last used time
-		lastUsed := hf.GetLastUsed(user, repo, quant)
-		if lastUsed.IsZero() {
-			info, _ := d.Info()
-			if info != nil {
-				lastUsed = info.ModTime()
-			} else {
-				lastUsed = time.Now()
-			}
-		}
-
-		// Apply filters
-		if olderThan > 0 {
-			if time.Since(lastUsed) < olderThan {
-				return nil
-			}
-		}
-
-		if largerThan > 0 {
-			if modelSize < largerThan {
-				return nil
-			}
-		}
-
-		models = append(models, ModelInfo{
-			User:     user,
-			Repo:     repo,
-			Quant:    quant,
-			Size:     modelSize,
-			LastUsed: lastUsed,
-		})
-
+func (w *modelWalker) walk(path string, d fs.DirEntry, err error) error {
+	if err != nil {
+		return fmt.Errorf("walk %s: %w", path, err)
+	}
+	if d.IsDir() || filepath.Ext(d.Name()) != ".gguf" {
 		return nil
-	})
+	}
 
-	return models, err
+	relPath, err := filepath.Rel(w.modelsDir, path)
+	if err != nil {
+		return fmt.Errorf("relative path of %s: %w", path, err)
+	}
+
+	parts := strings.Split(relPath, string(filepath.Separator))
+	if len(parts) < 3 {
+		return nil
+	}
+
+	user, repo := parts[0], parts[1]
+
+	quant, size, skip, err := classifyModelEntry(user, repo, parts, path, d, w.seen)
+	if err != nil {
+		return fmt.Errorf("classify %s: %w", relPath, err)
+	}
+	if skip {
+		return nil
+	}
+
+	if !w.re.MatchString(hf.FormatModelName(user, repo, quant)) && !w.re.MatchString(user+"/"+repo) {
+		return nil
+	}
+
+	lastUsed := modelLastUsed(user, repo, quant, d)
+	if !w.passesFilters(size, lastUsed) {
+		return nil
+	}
+
+	w.models = append(w.models, ModelInfo{
+		User:     user,
+		Repo:     repo,
+		Quant:    quant,
+		Size:     size,
+		LastUsed: lastUsed,
+	})
+	return nil
+}
+
+func (w *modelWalker) passesFilters(size int64, lastUsed time.Time) bool {
+	if w.olderThan > 0 && time.Since(lastUsed) < w.olderThan {
+		return false
+	}
+	if w.largerThan > 0 && size < w.largerThan {
+		return false
+	}
+	return true
+}
+
+// classifyModelEntry determines user/repo/quant/size for a .gguf file during a WalkDir.
+// Returns skip=true when the entry should be ignored (e.g. a duplicate split shard).
+func classifyModelEntry(user, repo string, parts []string, path string, d fs.DirEntry, seenSplitDirs map[string]bool) (quant string, size int64, skip bool, err error) {
+	if len(parts) == 4 && hf.SplitFilePattern.MatchString(d.Name()) {
+		quant = parts[2]
+		key := filepath.Join(user, repo, quant)
+		if seenSplitDirs[key] {
+			return "", 0, true, nil
+		}
+		seenSplitDirs[key] = true
+
+		entries, _ := os.ReadDir(filepath.Dir(path))
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".gguf") {
+				continue
+			}
+			if info, infoErr := entry.Info(); infoErr == nil {
+				size += info.Size()
+			}
+		}
+		return quant, size, false, nil
+	}
+
+	quant = strings.TrimSuffix(d.Name(), ".gguf")
+	info, err := d.Info()
+	if err != nil {
+		return "", 0, false, err
+	}
+	return quant, info.Size(), false, nil
+}
+
+// modelLastUsed returns the last-used time for a model, falling back to mtime.
+func modelLastUsed(user, repo, quant string, d fs.DirEntry) time.Time {
+	if t := hf.GetLastUsed(user, repo, quant); !t.IsZero() {
+		return t
+	}
+	if info, err := d.Info(); err == nil {
+		return info.ModTime()
+	}
+	return time.Now()
 }
 
 // globToRegex converts a glob pattern to a regex pattern

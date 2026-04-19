@@ -1,0 +1,6 @@
+name: Ministral 3 Instruct
+source: https://unsloth.ai/docs/models/tutorials/ministral-3.md
+match:
+  - "*/Ministral-3-*-Instruct*"
+options:
+  temp: 0.15

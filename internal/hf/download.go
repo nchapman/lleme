@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nchapman/lleme/internal/config"
+	"github.com/nchapman/lleme/internal/fileutil"
 	"github.com/nchapman/lleme/internal/version"
 	"gopkg.in/yaml.v3"
 )
@@ -31,12 +32,6 @@ type Downloader struct {
 	startTime  time.Time
 	lastUpdate time.Time
 	lastBytes  int64
-}
-
-func NewDownloader(client *Client) *Downloader {
-	return &Downloader{
-		client: client,
-	}
 }
 
 func NewDownloaderWithProgress(client *Client, progress ProgressCallback) *Downloader {
@@ -99,28 +94,17 @@ func (d *Downloader) DownloadModel(user, repo, branch, filename string, destPath
 	d.lastUpdate = d.startTime
 	d.lastBytes = fileSize
 
-	buf := make([]byte, 32*1024)
-	written := fileSize
+	var progressFn func(int64, int64)
+	if d.progress != nil {
+		progressFn = func(written, total int64) {
+			p := d.calculateProgress(written, total)
+			d.progress(p.Downloaded, p.Total, p.Speed, p.ETA)
+		}
+	}
 
-	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			if _, werr := file.Write(buf[:n]); werr != nil {
-				return nil, werr
-			}
-			written += int64(n)
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-
-		if d.progress != nil {
-			progress := d.calculateProgress(written, totalSize)
-			d.progress(progress.Downloaded, progress.Total, progress.Speed, progress.ETA)
-		}
+	written, err := fileutil.StreamBody(resp.Body, file, fileSize, totalSize, progressFn)
+	if err != nil {
+		return nil, err
 	}
 
 	file.Close()
@@ -161,10 +145,6 @@ func (d *Downloader) calculateProgress(downloaded, total int64) *DownloadProgres
 	}
 }
 
-func CalculateSHA256(filePath string) (string, error) {
-	return CalculateSHA256WithProgress(filePath, nil)
-}
-
 // CalculateSHA256WithProgress computes sha256 hash with optional progress callback.
 // The callback receives bytes processed and total size.
 func CalculateSHA256WithProgress(filePath string, progress func(processed, total int64)) (string, error) {
@@ -202,15 +182,6 @@ func CalculateSHA256WithProgress(filePath string, progress func(processed, total
 	}
 
 	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-func VerifySHA256(filePath, expectedHash string) (bool, error) {
-	actualHash, err := CalculateSHA256(filePath)
-	if err != nil {
-		return false, err
-	}
-
-	return strings.EqualFold(actualHash, expectedHash), nil
 }
 
 func GetModelPath(user, repo string) string {

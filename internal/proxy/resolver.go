@@ -39,20 +39,15 @@ func (r *ModelResolver) ListDownloadedModels() ([]DownloadedModel, error) {
 
 	err := filepath.WalkDir(r.modelsPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			return fmt.Errorf("walk %s: %w", path, err)
 		}
-
-		if d.IsDir() {
-			return nil
-		}
-
-		if filepath.Ext(d.Name()) != ".gguf" {
+		if d.IsDir() || filepath.Ext(d.Name()) != ".gguf" {
 			return nil
 		}
 
 		relPath, err := filepath.Rel(r.modelsPath, path)
 		if err != nil {
-			return err
+			return fmt.Errorf("relative path of %s: %w", path, err)
 		}
 
 		parts := strings.Split(relPath, string(filepath.Separator))
@@ -60,56 +55,54 @@ func (r *ModelResolver) ListDownloadedModels() ([]DownloadedModel, error) {
 			return nil
 		}
 
-		user := parts[0]
-		repo := parts[1]
+		user, repo := parts[0], parts[1]
 
-		// Check if this is a split file (in a quant subdirectory)
-		// Structure: user/repo/quant/model-00001-of-NNNNN.gguf
-		if len(parts) == 4 && hf.SplitFilePattern.MatchString(d.Name()) {
-			quant := parts[2]
-			splitDirKey := filepath.Join(user, repo, quant)
-
-			// Only add the first split file we encounter for this quant
-			if seenSplitDirs[splitDirKey] {
-				return nil
-			}
-			seenSplitDirs[splitDirKey] = true
-
-			// For split files, we want the first split file path
-			firstSplitPath := hf.FindFirstSplitFile(filepath.Dir(path))
-			if firstSplitPath == "" {
-				firstSplitPath = path // Fallback to current file
-			}
-
-			models = append(models, DownloadedModel{
-				User:      user,
-				Repo:      repo,
-				Quant:     quant,
-				FullName:  fmt.Sprintf("%s/%s:%s", user, repo, quant),
-				ModelPath: firstSplitPath,
-			})
-			return nil
+		if m, ok := classifyGGUFEntry(user, repo, parts, path, seenSplitDirs); ok {
+			models = append(models, m)
 		}
-
-		// Standard single-file model: user/repo/quant.gguf
-		quant := strings.TrimSuffix(d.Name(), ".gguf")
-
-		models = append(models, DownloadedModel{
-			User:      user,
-			Repo:      repo,
-			Quant:     quant,
-			FullName:  fmt.Sprintf("%s/%s:%s", user, repo, quant),
-			ModelPath: path,
-		})
 
 		return nil
 	})
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list downloaded models: %w", err)
 	}
 
 	return models, nil
+}
+
+// classifyGGUFEntry determines whether a GGUF file is a split or single-file model
+// and returns the corresponding DownloadedModel. Returns (model, false) if the file
+// should be skipped (e.g., a duplicate split shard).
+func classifyGGUFEntry(user, repo string, parts []string, path string, seenSplitDirs map[string]bool) (DownloadedModel, bool) {
+	if len(parts) == 4 && hf.SplitFilePattern.MatchString(filepath.Base(path)) {
+		quant := parts[2]
+		key := filepath.Join(user, repo, quant)
+		if seenSplitDirs[key] {
+			return DownloadedModel{}, false
+		}
+		seenSplitDirs[key] = true
+		firstPath := hf.FindFirstSplitFile(filepath.Dir(path))
+		if firstPath == "" {
+			firstPath = path
+		}
+		return DownloadedModel{
+			User:      user,
+			Repo:      repo,
+			Quant:     quant,
+			FullName:  fmt.Sprintf("%s/%s:%s", user, repo, quant),
+			ModelPath: firstPath,
+		}, true
+	}
+
+	quant := strings.TrimSuffix(filepath.Base(path), ".gguf")
+	return DownloadedModel{
+		User:      user,
+		Repo:      repo,
+		Quant:     quant,
+		FullName:  fmt.Sprintf("%s/%s:%s", user, repo, quant),
+		ModelPath: path,
+	}, true
 }
 
 // ResolveResult contains the result of a model resolution
@@ -134,110 +127,91 @@ func (r *ModelResolver) Resolve(query string) (*ResolveResult, error) {
 		return &ResolveResult{}, nil
 	}
 
-	// Normalize the query
 	query = strings.ToLower(strings.TrimSpace(query))
 
-	// Priority 1: Exact match (full name with quant)
+	for _, try := range []func([]DownloadedModel, string) (*ResolveResult, bool){
+		tryExactMatch,
+		tryRepoMatch,
+		trySuffixMatch,
+		tryContainsMatch,
+	} {
+		if result, ok := try(models, query); ok {
+			return result, nil
+		}
+	}
+
+	return &ResolveResult{Suggestions: fuzzyMatch(query, models)}, nil
+}
+
+// tryExactMatch matches the full "user/repo:quant" name.
+func tryExactMatch(models []DownloadedModel, query string) (*ResolveResult, bool) {
 	for i := range models {
 		if strings.ToLower(models[i].FullName) == query {
-			return &ResolveResult{
-				Model:   &models[i],
-				Matches: []DownloadedModel{models[i]},
-			}, nil
+			return &ResolveResult{Model: &models[i], Matches: []DownloadedModel{models[i]}}, true
 		}
 	}
+	return nil, false
+}
 
-	// Priority 2: Exact match on user/repo (without quant)
-	// Returns all quants for that repo
-	if !strings.Contains(query, ":") {
-		var repoMatches []DownloadedModel
-		for i := range models {
-			userRepo := strings.ToLower(fmt.Sprintf("%s/%s", models[i].User, models[i].Repo))
-			if userRepo == query {
-				repoMatches = append(repoMatches, models[i])
-			}
-		}
-		if len(repoMatches) == 1 {
-			return &ResolveResult{
-				Model:   &repoMatches[0],
-				Matches: repoMatches,
-			}, nil
-		}
-		if len(repoMatches) > 1 {
-			// Multiple quants - pick the best one (Q4_K_M preferred)
-			best := pickBestQuant(repoMatches)
-			return &ResolveResult{
-				Model:   best,
-				Matches: repoMatches,
-			}, nil
-		}
+// tryRepoMatch matches "user/repo" (without quant), picking the best quant when multiple exist.
+// All matches are guaranteed to share the same user/repo, so we pick best quant directly.
+func tryRepoMatch(models []DownloadedModel, query string) (*ResolveResult, bool) {
+	if strings.Contains(query, ":") {
+		return nil, false
 	}
-
-	// Priority 3: Suffix match (repo name or repo:quant)
-	var suffixMatches []DownloadedModel
+	var matches []DownloadedModel
 	for i := range models {
-		// Match on "repo:quant" or "repo"
+		if strings.ToLower(fmt.Sprintf("%s/%s", models[i].User, models[i].Repo)) == query {
+			matches = append(matches, models[i])
+		}
+	}
+	if len(matches) == 0 {
+		return nil, false
+	}
+	return &ResolveResult{Model: pickBestQuant(matches), Matches: matches}, true
+}
+
+// trySuffixMatch matches "repo:quant" or just "repo".
+func trySuffixMatch(models []DownloadedModel, query string) (*ResolveResult, bool) {
+	var matches []DownloadedModel
+	for i := range models {
 		repoQuant := strings.ToLower(fmt.Sprintf("%s:%s", models[i].Repo, models[i].Quant))
 		repo := strings.ToLower(models[i].Repo)
 		if repoQuant == query || repo == query {
-			suffixMatches = append(suffixMatches, models[i])
+			matches = append(matches, models[i])
 		}
 	}
-	if len(suffixMatches) == 1 {
-		return &ResolveResult{
-			Model:   &suffixMatches[0],
-			Matches: suffixMatches,
-		}, nil
-	}
-	if len(suffixMatches) > 1 {
-		// If all from same repo, pick best quant
-		if allSameRepo(suffixMatches) {
-			best := pickBestQuant(suffixMatches)
-			return &ResolveResult{
-				Model:   best,
-				Matches: suffixMatches,
-			}, nil
-		}
-		// Ambiguous - different repos
-		return &ResolveResult{
-			Matches: suffixMatches,
-		}, nil
-	}
+	return resolveCandidates(matches)
+}
 
-	// Priority 4: Contains match (case-insensitive)
-	var containsMatches []DownloadedModel
+// tryContainsMatch matches any model whose full name contains the query.
+func tryContainsMatch(models []DownloadedModel, query string) (*ResolveResult, bool) {
+	var matches []DownloadedModel
 	for i := range models {
-		fullLower := strings.ToLower(models[i].FullName)
-		if strings.Contains(fullLower, query) {
-			containsMatches = append(containsMatches, models[i])
+		if strings.Contains(strings.ToLower(models[i].FullName), query) {
+			matches = append(matches, models[i])
 		}
 	}
-	if len(containsMatches) == 1 {
-		return &ResolveResult{
-			Model:   &containsMatches[0],
-			Matches: containsMatches,
-		}, nil
-	}
-	if len(containsMatches) > 1 {
-		// If all from same repo, pick best quant
-		if allSameRepo(containsMatches) {
-			best := pickBestQuant(containsMatches)
-			return &ResolveResult{
-				Model:   best,
-				Matches: containsMatches,
-			}, nil
-		}
-		// Ambiguous - different repos
-		return &ResolveResult{
-			Matches: containsMatches,
-		}, nil
-	}
+	return resolveCandidates(matches)
+}
 
-	// No matches - try fuzzy suggestions
-	suggestions := fuzzyMatch(query, models)
-	return &ResolveResult{
-		Suggestions: suggestions,
-	}, nil
+// resolveCandidates converts a candidate list into a ResolveResult:
+// - 0 candidates: no match
+// - 1 candidate: unambiguous match
+// - N same-repo candidates: pick best quant
+// - N different-repo candidates: ambiguous
+func resolveCandidates(candidates []DownloadedModel) (*ResolveResult, bool) {
+	switch len(candidates) {
+	case 0:
+		return nil, false
+	case 1:
+		return &ResolveResult{Model: &candidates[0], Matches: candidates}, true
+	default:
+		if allSameRepo(candidates) {
+			return &ResolveResult{Model: pickBestQuant(candidates), Matches: candidates}, true
+		}
+		return &ResolveResult{Matches: candidates}, true
+	}
 }
 
 // allSameRepo checks if all models are from the same user/repo

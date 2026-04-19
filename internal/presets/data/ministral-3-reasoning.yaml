@@ -1,0 +1,7 @@
+name: Ministral 3 Reasoning
+source: https://unsloth.ai/docs/models/tutorials/ministral-3.md
+match:
+  - "*/Ministral-3-*-Reasoning*"
+options:
+  temp: 0.7
+  top-p: 0.95

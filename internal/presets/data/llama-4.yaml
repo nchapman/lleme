@@ -1,0 +1,8 @@
+name: Llama 4
+source: https://unsloth.ai/docs/models/tutorials/llama-4-how-to-run-and-fine-tune.md
+match:
+  - "*/Llama-4-*"
+options:
+  temp: 0.6
+  top-p: 0.9
+  min-p: 0.01

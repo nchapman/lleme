@@ -1,0 +1,9 @@
+name: Nemotron 3
+source: https://unsloth.ai/docs/models/nemotron-3.md
+match:
+  - "*/Nemotron-3-*"
+  - "*/NVIDIA-Nemotron-3-*"
+options:
+  temp: 1.0
+  top-p: 1.0
+  min-p: 0.01

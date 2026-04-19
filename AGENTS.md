@@ -35,9 +35,11 @@ Key packages in `internal/proxy/`:
 ### Package Structure
 
 - `cmd/` - Cobra CLI commands (run, pull, list, serve, status, etc.)
-- `internal/config/` - Config loading/saving, personas (saved model presets)
+- `internal/config/` - Config loading/saving, personas (user-saved model settings)
 - `internal/hf/` - Hugging Face API client, model downloads, quantization detection
 - `internal/llama/` - llama.cpp binary management
+- `internal/options/` - Settings resolver with layered precedence
+- `internal/presets/` - Built-in curated sampling defaults per model family (embedded YAML)
 - `internal/proxy/` - Multi-model proxy server
 - `internal/server/` - Backend API client (OpenAI-compatible)
 - `internal/tui/` - Bubbletea TUI (chat model, components, styles)
@@ -50,6 +52,24 @@ All data lives in `~/.lleme/`:
 - `models/` - Downloaded GGUF files (`user/repo/quant.gguf`)
 - `bin/` - llama.cpp binaries
 - `logs/` - Rotating log files
+
+### Settings Resolver & Presets
+
+Inference options flow through a layered resolver in `internal/options/resolver.go`. Precedence (highest to lowest):
+
+**session > persona > preset > config > llama-server default**
+
+- **session**: CLI flags for the current invocation.
+- **persona**: user-saved named bundle of options (`config.Persona`).
+- **preset**: built-in defaults curated per model family, matched by HuggingFace repo name.
+- **config**: `~/.lleme/config.yaml` global defaults.
+- **llama-server default**: the binary's own default if nothing is set.
+
+The resolver uses **key-existence semantics**: a key with value `0` is distinct from an absent key. Explicit zeros (e.g. `min-p: 0.0`) are honored at every layer. Adjacent helpers: `ResolveFloat` / `ResolveInt` for the session-flag case (zero still means "not set" because CLI flag defaults are zero), `GetConfigFloat` / `GetConfigInt` for the persona-and-below case.
+
+**Presets** live in `internal/presets/data/*.yaml`, embedded via `go:embed`. Each file defines sampling defaults for a model family and a list of `path.Match` globs against `user/repo`. Matching is case-insensitive and first-match-wins in **alphabetical order** of filename, so more specific files must sort before more general ones (e.g. `qwen3-coder.yaml` before `qwen3.yaml`).
+
+When adding or editing a preset, read `internal/presets/data/README.md` first — it documents pattern conventions, ordering rules, what belongs under `options` (sampling params only, no runtime/hardware knobs), and when to split a family into multiple files. The `presets_test.go` table should include a realistic HF repo name per new preset, plus an ordering test if the preset could be masked by a more general one.
 
 ## Code Patterns
 

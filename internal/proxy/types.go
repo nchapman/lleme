@@ -48,6 +48,7 @@ type Backend struct {
 	ReadyChan    chan struct{}  // Closed when backend is ready (for request coalescing)
 	readyOnce    sync.Once      // Ensures ReadyChan is closed exactly once
 	Options      map[string]any // Runtime options passed at load time (override config)
+	inFlight     int            // In-flight request count; prevents idle/LRU eviction while > 0
 }
 
 // CloseReadyChan safely closes the ReadyChan exactly once
@@ -90,6 +91,60 @@ func (b *Backend) IdleDuration() time.Duration {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return time.Since(b.LastActivity)
+}
+
+// AcquireRequest marks the start of an in-flight request. Paired with ReleaseRequest.
+// Backends with in-flight requests are skipped by idle and LRU eviction.
+func (b *Backend) AcquireRequest() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.inFlight++
+	b.LastActivity = time.Now()
+}
+
+// ReleaseRequest marks the end of an in-flight request.
+func (b *Backend) ReleaseRequest() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.inFlight > 0 {
+		b.inFlight--
+	}
+	b.LastActivity = time.Now()
+}
+
+// InFlight returns the current number of in-flight requests.
+func (b *Backend) InFlight() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.inFlight
+}
+
+// PID returns the backend process PID, or 0 if not yet started.
+// Guarded by b.mu because Process is assigned and torn down concurrently.
+func (b *Backend) PID() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.Process == nil {
+		return 0
+	}
+	return b.Process.Pid
+}
+
+// GetProcess returns the underlying *os.Process pointer (or nil). The returned
+// pointer's methods (Signal/Wait/Kill) are safe to call without b.mu because
+// os.Process is internally goroutine-safe; the lock only guards the pointer
+// itself against concurrent reassignment.
+func (b *Backend) GetProcess() *os.Process {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.Process
+}
+
+// SetProcess assigns the backend's process under the lock.
+func (b *Backend) SetProcess(p *os.Process) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.Process = p
 }
 
 // Config holds proxy configuration

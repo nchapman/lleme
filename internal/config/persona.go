@@ -16,63 +16,17 @@ type Persona struct {
 	Options map[string]any `yaml:"options,omitempty"`
 }
 
-// GetFloatOption returns a float option from the persona, with a default if not set.
-func (p *Persona) GetFloatOption(key string, defaultVal float64) float64 {
-	if p == nil || p.Options == nil {
-		return defaultVal
-	}
-	if val, ok := p.Options[key]; ok {
-		switch v := val.(type) {
-		case float64:
-			return v
-		case int:
-			return float64(v)
-		}
-	}
-	return defaultVal
-}
-
-// GetIntOption returns an int option from the persona, with a default if not set.
-func (p *Persona) GetIntOption(key string, defaultVal int) int {
-	if p == nil || p.Options == nil {
-		return defaultVal
-	}
-	if val, ok := p.Options[key]; ok {
-		switch v := val.(type) {
-		case int:
-			return v
-		case float64:
-			return int(v)
-		}
-	}
-	return defaultVal
-}
-
-// GetServerOptions returns a map of server options (ctx-size, gpu-layers, threads, etc.)
-// that should be passed to the model loading API.
+// GetServerOptions returns all persona options to pass to the model loading API.
+// Returns a shallow copy to prevent callers from mutating persona state.
 func (p *Persona) GetServerOptions() map[string]any {
-	if p == nil || p.Options == nil {
+	if p == nil || len(p.Options) == 0 {
 		return nil
 	}
-
-	// Server options that affect model loading
-	serverOptionKeys := []string{
-		"ctx-size", "gpu-layers", "threads",
-		"batch-size", "ubatch-size", "flash-attn",
-		"mlock", "cache-type-k", "cache-type-v",
+	out := make(map[string]any, len(p.Options))
+	for k, v := range p.Options {
+		out[k] = v
 	}
-
-	result := make(map[string]any)
-	for _, key := range serverOptionKeys {
-		if val, ok := p.Options[key]; ok {
-			result[key] = val
-		}
-	}
-
-	if len(result) == 0 {
-		return nil
-	}
-	return result
+	return out
 }
 
 const personasDir = "personas"
@@ -123,25 +77,6 @@ func LoadPersona(name string) (*Persona, error) {
 	return &persona, nil
 }
 
-// SavePersona saves a persona to disk.
-func SavePersona(name string, persona *Persona) error {
-	if err := os.MkdirAll(PersonasPath(), 0755); err != nil {
-		return fmt.Errorf("failed to create personas directory: %w", err)
-	}
-
-	data, err := yaml.Marshal(persona)
-	if err != nil {
-		return fmt.Errorf("failed to marshal persona: %w", err)
-	}
-
-	path := PersonaPath(name)
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("failed to write persona: %w", err)
-	}
-
-	return nil
-}
-
 // SavePersonaTemplate saves a persona with helpful comments.
 func SavePersonaTemplate(name string, persona *Persona) error {
 	if err := os.MkdirAll(PersonasPath(), 0755); err != nil {
@@ -153,43 +88,10 @@ func SavePersonaTemplate(name string, persona *Persona) error {
 	b.WriteString("#\n")
 	b.WriteString("# Run with: lleme run " + name + "\n\n")
 
-	if persona.Model != "" {
-		b.WriteString("model: " + persona.Model + "\n\n")
-	} else {
-		b.WriteString("# Base model (required, or specify at runtime)\n")
-		b.WriteString("# model: bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M\n\n")
-	}
-
-	if persona.System != "" {
-		b.WriteString("system: |\n")
-		for line := range strings.SplitSeq(persona.System, "\n") {
-			b.WriteString("  " + line + "\n")
-		}
-		b.WriteString("\n")
-	} else {
-		b.WriteString("# System prompt\n")
-		b.WriteString("# system: |\n")
-		b.WriteString("#   You are a helpful assistant.\n\n")
-	}
-
-	b.WriteString("# llama.cpp options (same as config llamacpp.options)\n")
-	b.WriteString("# options:\n")
-	b.WriteString("#   temp: 0.8\n")
-	b.WriteString("#   top-p: 0.9\n")
-	b.WriteString("#   top-k: 40\n")
-	b.WriteString("#   repeat-penalty: 1.0\n")
-
-	if len(persona.Options) > 0 {
-		b.WriteString("\noptions:\n")
-		optData, err := yaml.Marshal(persona.Options)
-		if err != nil {
-			return fmt.Errorf("failed to marshal options: %w", err)
-		}
-		for line := range strings.SplitSeq(string(optData), "\n") {
-			if line != "" {
-				b.WriteString("  " + line + "\n")
-			}
-		}
+	writePersonaModelSection(&b, persona)
+	writePersonaSystemSection(&b, persona)
+	if err := writePersonaOptionsSection(&b, persona); err != nil {
+		return err
 	}
 
 	path := PersonaPath(name)
@@ -197,6 +99,54 @@ func SavePersonaTemplate(name string, persona *Persona) error {
 		return fmt.Errorf("failed to write persona: %w", err)
 	}
 
+	return nil
+}
+
+func writePersonaModelSection(b *strings.Builder, persona *Persona) {
+	if persona.Model != "" {
+		b.WriteString("model: " + persona.Model + "\n\n")
+		return
+	}
+	b.WriteString("# Base model (required, or specify at runtime)\n")
+	b.WriteString("# model: bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M\n\n")
+}
+
+func writePersonaSystemSection(b *strings.Builder, persona *Persona) {
+	if persona.System != "" {
+		b.WriteString("system: |\n")
+		for line := range strings.SplitSeq(persona.System, "\n") {
+			b.WriteString("  " + line + "\n")
+		}
+		b.WriteString("\n")
+		return
+	}
+	b.WriteString("# System prompt\n")
+	b.WriteString("# system: |\n")
+	b.WriteString("#   You are a helpful assistant.\n\n")
+}
+
+func writePersonaOptionsSection(b *strings.Builder, persona *Persona) error {
+	b.WriteString("# llama.cpp options (same as config llamacpp.options)\n")
+	b.WriteString("# options:\n")
+	b.WriteString("#   temp: 0.8\n")
+	b.WriteString("#   top-p: 0.9\n")
+	b.WriteString("#   top-k: 40\n")
+	b.WriteString("#   repeat-penalty: 1.0\n")
+
+	if len(persona.Options) == 0 {
+		return nil
+	}
+
+	b.WriteString("\noptions:\n")
+	optData, err := yaml.Marshal(persona.Options)
+	if err != nil {
+		return fmt.Errorf("failed to marshal options: %w", err)
+	}
+	for line := range strings.SplitSeq(string(optData), "\n") {
+		if line != "" {
+			b.WriteString("  " + line + "\n")
+		}
+	}
 	return nil
 }
 

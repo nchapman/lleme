@@ -16,16 +16,13 @@ const (
 )
 
 var (
-	headerStyle   = lipgloss.NewStyle().Bold(true).Foreground(styles.ColorPrimary)
-	successStyle  = lipgloss.NewStyle().Foreground(styles.ColorSuccess)
-	errorStyle    = lipgloss.NewStyle().Foreground(styles.ColorError)
-	warningStyle  = lipgloss.NewStyle().Foreground(styles.ColorWarning)
-	mutedStyle    = lipgloss.NewStyle().Foreground(styles.ColorMuted)
-	boldStyle     = lipgloss.NewStyle().Bold(true)
-	keywordStyle  = lipgloss.NewStyle().Bold(true).Foreground(styles.ColorAccent)
-	valueStyle    = lipgloss.NewStyle().Foreground(styles.ColorValue)
-	borderStyle   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder())
-	borderPadding = lipgloss.NewStyle().Padding(1, 2)
+	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(styles.ColorPrimary)
+	successStyle = lipgloss.NewStyle().Foreground(styles.ColorSuccess)
+	errorStyle   = lipgloss.NewStyle().Foreground(styles.ColorError)
+	warningStyle = lipgloss.NewStyle().Foreground(styles.ColorWarning)
+	mutedStyle   = lipgloss.NewStyle().Foreground(styles.ColorMuted)
+	boldStyle    = lipgloss.NewStyle().Bold(true)
+	keywordStyle = lipgloss.NewStyle().Bold(true).Foreground(styles.ColorAccent)
 
 	// ExitFunc is the function called by Fatal. Override in tests to prevent os.Exit.
 	// Tests that modify this must use t.Cleanup() to restore the original value.
@@ -58,14 +55,6 @@ func Bold(text string) string {
 
 func Keyword(text string) string {
 	return keywordStyle.Render(text)
-}
-
-func Value(text string) string {
-	return valueStyle.Render(text)
-}
-
-func Box(text string) string {
-	return borderPadding.Render(borderStyle.Render(text))
 }
 
 // LlamaCppCredit returns the llama.cpp attribution line.

@@ -43,10 +43,31 @@ Examples:
   lleme server restart        # Restart the server (always in background)`,
 }
 
+// validateServerFlags validates CLI overrides for host/port/max-models.
+// Zero values mean "use config default" and are allowed.
+func validateServerFlags() error {
+	if serverPort != 0 && (serverPort < 1 || serverPort > 65535) {
+		return fmt.Errorf("--port %d is out of range (must be 1-65535)", serverPort)
+	}
+	if serverMaxModels < 0 {
+		return fmt.Errorf("--max-models %d must be non-negative (0 means unlimited)", serverMaxModels)
+	}
+	return nil
+}
+
 var serverStartCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start the proxy server",
+	Long: `Start the lleme proxy server in the foreground (or detached with -d).
+
+The server listens for OpenAI- and Anthropic-compatible API requests and routes
+them to the appropriate llama.cpp backend, loading models on demand.
+
+Use --host, --port, and --max-models to override the values from config.`,
 	PreRun: func(cmd *cobra.Command, args []string) {
+		if err := validateServerFlags(); err != nil {
+			ui.Fatal("%v", err)
+		}
 		if !llama.IsInstalled() {
 			fmt.Println("Installing llama.cpp...")
 			fmt.Println()
@@ -62,7 +83,8 @@ var serverStartCmd = &cobra.Command{
 			ui.PrintError("Server already running on http://%s:%d (PID %d)",
 				existingState.Host, existingState.Port, existingState.PID)
 			fmt.Println("Use 'lleme server stop' to stop the existing server first")
-			os.Exit(1)
+			ui.ExitFunc(1)
+			return
 		}
 
 		if serverDetach {
@@ -79,6 +101,10 @@ var serverStartCmd = &cobra.Command{
 var serverStopCmd = &cobra.Command{
 	Use:   "stop",
 	Short: "Stop the proxy server",
+	Long: `Stop the running lleme proxy server.
+
+Unloads all backends gracefully (SIGTERM with a 5s timeout before SIGKILL) and
+clears the on-disk state file.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		stopped, err := stopServer()
 		if err != nil {
@@ -96,6 +122,14 @@ var serverStopCmd = &cobra.Command{
 var serverRestartCmd = &cobra.Command{
 	Use:   "restart",
 	Short: "Restart the proxy server",
+	Long: `Stop the running proxy (if any) and start a fresh instance in the background.
+
+Use --host, --port, and --max-models to change the server's binding on restart.`,
+	PreRun: func(cmd *cobra.Command, args []string) {
+		if err := validateServerFlags(); err != nil {
+			ui.Fatal("%v", err)
+		}
+	},
 	Run: func(cmd *cobra.Command, args []string) {
 		stopped, _ := stopServer()
 		if stopped {
@@ -324,11 +358,16 @@ func startServerDetached() {
 var internalServeCmd = &cobra.Command{
 	Use:    "internal-serve",
 	Hidden: true,
+	PreRun: func(cmd *cobra.Command, args []string) {
+		if err := validateServerFlags(); err != nil {
+			ui.Fatal("%v", err)
+		}
+	},
 	Run: func(cmd *cobra.Command, args []string) {
 		// Set up logging - daemon owns its log file
 		logFile, err := logs.NewRotatingWriter(logs.ProxyLogPath())
 		if err != nil {
-			os.Exit(1)
+			ui.Fatal("Failed to open proxy log: %v", err)
 		}
 		defer logFile.Close()
 		logs.InitLogger(logFile, false)
@@ -337,7 +376,7 @@ var internalServeCmd = &cobra.Command{
 		cfg, err := config.Load()
 		if err != nil {
 			logs.Warn("Failed to load config", "error", err)
-			os.Exit(1)
+			ui.Fatal("Failed to load config: %v", err)
 		}
 
 		// Build proxy config from app config + CLI overrides
@@ -356,7 +395,7 @@ var internalServeCmd = &cobra.Command{
 		server := proxy.NewServer(proxyCfg, cfg)
 		if err := server.Start(); err != nil {
 			logs.Warn("Failed to start server", "error", err)
-			os.Exit(1)
+			ui.Fatal("Failed to start server: %v", err)
 		}
 
 		// Wait for shutdown signal

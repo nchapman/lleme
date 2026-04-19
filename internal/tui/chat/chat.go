@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/options"
+	"github.com/nchapman/lleme/internal/presets"
 	"github.com/nchapman/lleme/internal/server"
 	"github.com/nchapman/lleme/internal/tui/components"
 )
@@ -70,6 +71,7 @@ type Model struct {
 	model       string
 	cfg         *config.Config
 	persona     *config.Persona
+	preset      *presets.Preset
 	personaName string
 	resolver    *options.Resolver
 
@@ -97,12 +99,14 @@ type Model struct {
 // SessionOptions holds runtime-adjustable options for the chat session
 type SessionOptions struct {
 	// Request-time options (no restart needed)
-	Temp          float64
-	TopP          float64
-	TopK          int
-	RepeatPenalty float64
-	MinP          float64
-	MaxTokens     int
+	Temp             float64
+	TopP             float64
+	TopK             int
+	RepeatPenalty    float64
+	PresencePenalty  float64
+	FrequencyPenalty float64
+	MinP             float64
+	MaxTokens        int
 
 	// Server options (require model reload)
 	CtxSize   int
@@ -116,7 +120,7 @@ type SessionOptions struct {
 }
 
 // New creates a new chat TUI model
-func New(api *server.APIClient, modelName string, cfg *config.Config, persona *config.Persona, personaName string) *Model {
+func New(api *server.APIClient, modelName string, cfg *config.Config, persona *config.Persona, preset *presets.Preset, personaName string) *Model {
 	m := &Model{
 		header:   components.NewHeader(),
 		messages: components.NewMessages(),
@@ -127,8 +131,9 @@ func New(api *server.APIClient, modelName string, cfg *config.Config, persona *c
 		model:       modelName,
 		cfg:         cfg,
 		persona:     persona,
+		preset:      preset,
 		personaName: personaName,
-		resolver:    options.NewResolver(persona, cfg),
+		resolver:    options.NewResolver(persona, cfg, preset),
 
 		chatMessages: []server.ChatMessage{},
 		keys:         DefaultKeyMap(),
@@ -162,25 +167,15 @@ func (m *Model) SetInitialServerOptions(ctxSize, gpuLayers, threads int, ctxSize
 }
 
 // SetSamplingOptions sets the sampling options from CLI flags
-func (m *Model) SetSamplingOptions(temp, topP, minP, repeatPenalty float64, topK, maxTokens int) {
-	if temp != 0 {
-		m.options.Temp = temp
-	}
-	if topP != 0 {
-		m.options.TopP = topP
-	}
-	if topK != 0 {
-		m.options.TopK = topK
-	}
-	if minP != 0 {
-		m.options.MinP = minP
-	}
-	if repeatPenalty != 0 {
-		m.options.RepeatPenalty = repeatPenalty
-	}
-	if maxTokens != 0 {
-		m.options.MaxTokens = maxTokens
-	}
+func (m *Model) SetSamplingOptions(temp, topP, minP, repeatPenalty, presencePenalty, frequencyPenalty float64, topK, maxTokens int) {
+	m.options.Temp = temp
+	m.options.TopP = topP
+	m.options.TopK = topK
+	m.options.MinP = minP
+	m.options.RepeatPenalty = repeatPenalty
+	m.options.PresencePenalty = presencePenalty
+	m.options.FrequencyPenalty = frequencyPenalty
+	m.options.MaxTokens = maxTokens
 }
 
 // SetSystemPrompt sets a system prompt override from CLI flags
@@ -209,11 +204,12 @@ func (m *Model) preloadModel() tea.Cmd {
 	if m.persona != nil {
 		personaOpts = m.persona.GetServerOptions()
 	}
+	mergedOpts := presets.MergeServerOptions(m.preset, personaOpts)
 
 	return func() tea.Msg {
 		var opts *server.RunOptions
-		if options.CtxSizeSet || options.GpuLayersSet || options.ThreadsSet || personaOpts != nil {
-			opts = &server.RunOptions{Options: personaOpts}
+		if options.CtxSizeSet || options.GpuLayersSet || options.ThreadsSet || mergedOpts != nil {
+			opts = &server.RunOptions{Options: mergedOpts}
 			if options.CtxSizeSet {
 				opts.CtxSize = server.IntPtr(options.CtxSize)
 			}
@@ -232,7 +228,7 @@ func (m *Model) preloadModel() tea.Cmd {
 }
 
 // Update handles messages
-func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:gocognit,cyclop // essential: bubbletea message dispatch
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
@@ -505,6 +501,8 @@ func (m *Model) sendMessage(content string) tea.Cmd {
 	req.TopK = m.resolver.ResolveInt(m.options.TopK, "top-k")
 	req.MinP = m.resolver.ResolveFloat(m.options.MinP, "min-p")
 	req.RepeatPenalty = m.resolver.ResolveFloat(m.options.RepeatPenalty, "repeat-penalty")
+	req.PresencePenalty = m.resolver.ResolveFloat(m.options.PresencePenalty, "presence-penalty")
+	req.FrequencyPenalty = m.resolver.ResolveFloat(m.options.FrequencyPenalty, "frequency-penalty")
 
 	streamCmd := func() tea.Msg {
 		var fullContent strings.Builder

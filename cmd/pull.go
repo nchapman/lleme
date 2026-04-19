@@ -7,7 +7,6 @@ import (
 
 	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/hf"
-	"github.com/nchapman/lleme/internal/peer"
 	"github.com/nchapman/lleme/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -40,7 +39,8 @@ Examples:
 		modelInfo, err := client.GetModel(user, repo)
 		if err != nil {
 			handleModelError(err, user, repo)
-			os.Exit(1)
+			ui.ExitFunc(1)
+			return
 		}
 
 		if bool(modelInfo.Gated) && !hf.HasToken(cfg) {
@@ -50,7 +50,8 @@ Examples:
 			fmt.Println("  1. Get a token at https://huggingface.co/settings/tokens")
 			fmt.Println("  2. Run: hf auth login")
 			fmt.Println("     Or set: export HF_TOKEN=hf_xxxxx")
-			os.Exit(1)
+			ui.ExitFunc(1)
+			return
 		}
 
 		files, err := client.ListFiles(user, repo, "main")
@@ -62,7 +63,8 @@ Examples:
 		if len(quants) == 0 {
 			ui.PrintError("No GGUF files found")
 			fmt.Printf("\nThe repository '%s/%s' exists but contains no GGUF files.\n", user, repo)
-			os.Exit(1)
+			ui.ExitFunc(1)
+			return
 		}
 
 		// Find the quantization to use
@@ -80,7 +82,8 @@ Examples:
 				for _, q := range hf.SortQuantizations(quants) {
 					fmt.Printf("  • %s (%s)\n", q.Name, ui.FormatBytes(q.Size))
 				}
-				os.Exit(1)
+				ui.ExitFunc(1)
+				return
 			}
 		}
 
@@ -106,15 +109,9 @@ Examples:
 			return
 		}
 
-		// Pull the model (tries peers first if enabled, then HuggingFace)
-		result, err := pullModelWithProgress(client, cfg, user, repo, selectedQuant)
+		result, err := pullModelWithProgress(client, user, repo, selectedQuant)
 		if err != nil {
 			ui.Fatal("%v", err)
-		}
-
-		// Update peer sharing index
-		if err := peer.RebuildPeerFileIndex(); err != nil {
-			ui.PrintError("Failed to update peer index: %v", err)
 		}
 
 		modelName := hf.FormatModelName(user, repo, selectedQuant.Name)
@@ -126,9 +123,8 @@ Examples:
 	},
 }
 
-// pullModelWithProgress wraps hf.PullModel with progress bar display and peer support.
-func pullModelWithProgress(client *hf.Client, cfg *config.Config, user, repo string, quant hf.Quantization) (*hf.PullResult, error) {
-	// Get manifest info for display (also returns manifest to pass to PullModel)
+// pullModelWithProgress wraps hf.PullModel with progress bar display.
+func pullModelWithProgress(client *hf.Client, user, repo string, quant hf.Quantization) (*hf.PullResult, error) {
 	info, manifest, manifestJSON, err := hf.GetManifestInfo(client, user, repo, quant)
 	if err != nil {
 		return nil, err
@@ -147,11 +143,6 @@ func pullModelWithProgress(client *hf.Client, cfg *config.Config, user, repo str
 	opts := &hf.PullOptions{
 		Manifest:     manifest,
 		ManifestJSON: manifestJSON,
-	}
-
-	// Add peer download support if enabled
-	if cfg != nil && cfg.Peer.Enabled {
-		opts.PeerDownload = peer.CreateDownloader()
 	}
 
 	return hf.PullModelWithProgressFactory(client, user, repo, quant, opts, newProgressBar)

@@ -1,0 +1,9 @@
+name: GLM-5
+source: https://unsloth.ai/docs/models/tutorials/glm-5.md
+match:
+  - "*/glm-5-*"
+  - "*/glm-5"
+options:
+  temp: 1.0
+  top-p: 0.95
+  min-p: 0.01

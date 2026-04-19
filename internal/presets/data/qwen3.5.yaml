@@ -1,0 +1,10 @@
+name: Qwen3.5
+source: https://unsloth.ai/docs/models/qwen3.5.md
+match:
+  - "*/Qwen3.5*"
+options:
+  temp: 1.0
+  top-p: 0.95
+  top-k: 20
+  min-p: 0.0
+  presence-penalty: 1.5

@@ -26,17 +26,19 @@ type StreamOptions struct {
 }
 
 type ChatCompletionRequest struct {
-	Model           string         `json:"model"`
-	Messages        []ChatMessage  `json:"messages"`
-	Stream          bool           `json:"stream"`
-	StreamOptions   *StreamOptions `json:"stream_options,omitempty"`
-	Temperature     float64        `json:"temperature,omitempty"`
-	TopP            float64        `json:"top_p,omitempty"`
-	TopK            int            `json:"top_k,omitempty"`
-	MinP            float64        `json:"min_p,omitempty"`
-	RepeatPenalty   float64        `json:"repeat_penalty,omitempty"`
-	MaxTokens       int            `json:"max_tokens,omitempty"`
-	ReasoningFormat string         `json:"reasoning_format,omitempty"`
+	Model            string         `json:"model"`
+	Messages         []ChatMessage  `json:"messages"`
+	Stream           bool           `json:"stream"`
+	StreamOptions    *StreamOptions `json:"stream_options,omitempty"`
+	Temperature      float64        `json:"temperature,omitempty"`
+	TopP             float64        `json:"top_p,omitempty"`
+	TopK             int            `json:"top_k,omitempty"`
+	MinP             float64        `json:"min_p,omitempty"`
+	RepeatPenalty    float64        `json:"repeat_penalty,omitempty"`
+	PresencePenalty  float64        `json:"presence_penalty,omitempty"`
+	FrequencyPenalty float64        `json:"frequency_penalty,omitempty"`
+	MaxTokens        int            `json:"max_tokens,omitempty"`
+	ReasoningFormat  string         `json:"reasoning_format,omitempty"`
 }
 
 type ChatCompletionResponse struct {
@@ -94,20 +96,17 @@ type HealthResponse struct {
 	Status string `json:"status"`
 }
 
+// maxErrorBodyBytes caps the error-response body we read so a pathological
+// backend reply doesn't blow up memory. Error bodies are small in practice.
+const maxErrorBodyBytes = 64 * 1024
+
 // checkResponse reads the response body and returns an error if status is not OK.
 func checkResponse(resp *http.Response, operation string) error {
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		return fmt.Errorf("%s: HTTP %d: %s", operation, resp.StatusCode, string(body))
 	}
 	return nil
-}
-
-func NewAPIClient(host string, port int) *APIClient {
-	return &APIClient{
-		baseURL: fmt.Sprintf("http://%s:%d", host, port),
-		client:  &http.Client{},
-	}
 }
 
 func NewAPIClientFromURL(baseURL string) *APIClient {
@@ -207,35 +206,9 @@ func (api *APIClient) StreamChatCompletion(ctx context.Context, req *ChatComplet
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-
-		line := scanner.Text()
-
-		if line == "" || line == "data: [DONE]" {
-			continue
-		}
-
-		if jsonData, found := strings.CutPrefix(line, "data: "); found {
-			var chunk StreamChunk
-			if err := json.Unmarshal([]byte(jsonData), &chunk); err != nil {
-				parseErrors++
-				lastParseErr = err
-				continue
-			}
-
-			if len(chunk.Choices) > 0 {
-				delta := chunk.Choices[0].Delta
-				if delta.ReasoningContent != "" && cb.ReasoningCallback != nil {
-					cb.ReasoningCallback(delta.ReasoningContent)
-				}
-				if delta.Content != "" && cb.ContentCallback != nil {
-					cb.ContentCallback(delta.Content)
-				}
-			}
-
-			// Call timings callback if we got timing stats (usually in final chunk)
-			if chunk.Timings != nil && cb.TimingsCallback != nil {
-				cb.TimingsCallback(chunk.Timings)
-			}
+		if err := handleStreamLine(scanner.Text(), cb); err != nil {
+			parseErrors++
+			lastParseErr = err
 		}
 	}
 
@@ -250,63 +223,71 @@ func (api *APIClient) StreamChatCompletion(ctx context.Context, req *ChatComplet
 	return nil
 }
 
+func handleStreamLine(line string, cb StreamCallback) error {
+	if line == "" || line == "data: [DONE]" {
+		return nil
+	}
+
+	jsonData, found := strings.CutPrefix(line, "data: ")
+	if !found {
+		return nil
+	}
+
+	var chunk StreamChunk
+	if err := json.Unmarshal([]byte(jsonData), &chunk); err != nil {
+		return err
+	}
+
+	if len(chunk.Choices) > 0 {
+		delta := chunk.Choices[0].Delta
+		if delta.ReasoningContent != "" && cb.ReasoningCallback != nil {
+			cb.ReasoningCallback(delta.ReasoningContent)
+		}
+		if delta.Content != "" && cb.ContentCallback != nil {
+			cb.ContentCallback(delta.Content)
+		}
+	}
+
+	if chunk.Timings != nil && cb.TimingsCallback != nil {
+		cb.TimingsCallback(chunk.Timings)
+	}
+
+	return nil
+}
+
 // StopModel unloads a model from the proxy server.
 func (api *APIClient) StopModel(model string) error {
-	type StopModelRequest struct {
+	return api.postJSON(fmt.Sprintf("%s/api/stop", api.baseURL), struct {
 		Model string `json:"model"`
-	}
-
-	url := fmt.Sprintf("%s/api/stop", api.baseURL)
-
-	req := StopModelRequest{Model: model}
-	body, err := json.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
-	}
-
-	httpReq, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := api.client.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	return checkResponse(resp, "stop model")
+	}{Model: model}, "stop model")
 }
 
 func (api *APIClient) SetModel(modelPath string) error {
-	type LoadModelRequest struct {
+	return api.postJSON(fmt.Sprintf("%s/v1/load", api.baseURL), struct {
 		Model string `json:"model"`
-	}
+	}{Model: modelPath}, "load model")
+}
 
-	url := fmt.Sprintf("%s/v1/load", api.baseURL)
-
-	req := LoadModelRequest{Model: modelPath}
-	body, err := json.Marshal(req)
+func (api *APIClient) postJSON(url string, payload any, operation string) error {
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := api.client.Do(httpReq)
+	resp, err := api.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("send request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	return checkResponse(resp, "load model")
+	return checkResponse(resp, operation)
 }
 
 // RunOptions contains server options for loading a model.

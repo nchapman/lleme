@@ -405,26 +405,3 @@ func TestIsProxyRunning(t *testing.T) {
 		t.Error("expected true with running process")
 	}
 }
-
-func TestGetProxyURL(t *testing.T) {
-	useTestHome(t)
-
-	// No state
-	if url := GetProxyURL(); url != "" {
-		t.Errorf("expected empty URL with no state, got %s", url)
-	}
-
-	// With state
-	state := &ProxyState{
-		PID:       os.Getpid(),
-		Host:      "127.0.0.1",
-		Port:      11313,
-		StartedAt: time.Now(),
-	}
-	SaveProxyState(state)
-
-	expected := "http://127.0.0.1:11313"
-	if url := GetProxyURL(); url != expected {
-		t.Errorf("expected %s, got %s", expected, url)
-	}
-}

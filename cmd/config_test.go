@@ -211,14 +211,14 @@ func TestConfigYAMLRoundTrip(t *testing.T) {
 	}
 
 	// Verify values preserved
-	if restored.LlamaCpp.GetFloatOption("temp", 0) != 0.5 {
-		t.Errorf("temp: expected 0.5, got %v", restored.LlamaCpp.GetFloatOption("temp", 0))
+	if v, ok := restored.LlamaCpp.GetOption("temp"); !ok || v != 0.5 {
+		t.Errorf("temp: expected 0.5, got %v (ok=%v)", v, ok)
 	}
-	if restored.LlamaCpp.GetIntOption("ctx-size", 0) != 8192 {
-		t.Errorf("ctx-size: expected 8192, got %d", restored.LlamaCpp.GetIntOption("ctx-size", 0))
+	if v, ok := restored.LlamaCpp.GetOption("ctx-size"); !ok || v != 8192 {
+		t.Errorf("ctx-size: expected 8192, got %v (ok=%v)", v, ok)
 	}
-	if restored.LlamaCpp.GetIntOption("gpu-layers", 0) != 32 {
-		t.Errorf("gpu-layers: expected 32, got %d", restored.LlamaCpp.GetIntOption("gpu-layers", 0))
+	if v, ok := restored.LlamaCpp.GetOption("gpu-layers"); !ok || v != 32 {
+		t.Errorf("gpu-layers: expected 32, got %v (ok=%v)", v, ok)
 	}
 }
 
@@ -508,8 +508,8 @@ func TestConfigSetGetIntegration(t *testing.T) {
 
 		// Reload and verify
 		loaded, _ := config.Load()
-		if loaded.LlamaCpp.GetIntOption("ctx-size", 0) != 8192 {
-			t.Errorf("expected ctx-size 8192, got %d", loaded.LlamaCpp.GetIntOption("ctx-size", 0))
+		if v, ok := loaded.LlamaCpp.GetOption("ctx-size"); !ok || v != 8192 {
+			t.Errorf("expected ctx-size 8192, got %v (ok=%v)", v, ok)
 		}
 	})
 

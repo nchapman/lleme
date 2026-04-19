@@ -6,9 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/llama"
-	"github.com/nchapman/lleme/internal/peer"
 	"github.com/nchapman/lleme/internal/proxy"
 	"github.com/nchapman/lleme/internal/ui"
 	"github.com/spf13/cobra"
@@ -94,14 +92,6 @@ var statusCmd = &cobra.Command{
 		} else {
 			fmt.Printf("%d %s loaded\n", len(status.Models), modelWord)
 		}
-
-		// Show peer status if enabled
-		cfg, err := config.Load()
-		if err != nil {
-			fmt.Println(ui.Muted("Note: unable to load config; skipping peer status"))
-		} else if cfg != nil && cfg.Peer.Enabled {
-			showPeerStatus()
-		}
 	},
 }
 
@@ -170,24 +160,6 @@ func formatTimeSince(t time.Time) string {
 		return fmt.Sprintf("%dh ago", int(diff.Hours()))
 	}
 	return t.Format("Jan 2 15:04")
-}
-
-func showPeerStatus() {
-	peers := peer.DiscoverPeers()
-
-	fmt.Println()
-	if len(peers) == 0 {
-		fmt.Printf("%s %s\n", ui.Muted("Peers:"), ui.Muted("none discovered"))
-	} else {
-		peerWord := "peer"
-		if len(peers) != 1 {
-			peerWord = "peers"
-		}
-		fmt.Printf("%s %d %s on network\n", ui.Muted("Peers:"), len(peers), peerWord)
-		for _, p := range peers {
-			fmt.Printf("  %s %s\n", ui.Muted("•"), p.Host)
-		}
-	}
 }
 
 func init() {

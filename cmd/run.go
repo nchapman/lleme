@@ -15,7 +15,7 @@ import (
 	"github.com/nchapman/lleme/internal/hf"
 	"github.com/nchapman/lleme/internal/llama"
 	"github.com/nchapman/lleme/internal/logs"
-	"github.com/nchapman/lleme/internal/peer"
+	"github.com/nchapman/lleme/internal/presets"
 	"github.com/nchapman/lleme/internal/proxy"
 	"github.com/nchapman/lleme/internal/server"
 	"github.com/nchapman/lleme/internal/tui/chat"
@@ -24,13 +24,15 @@ import (
 )
 
 var (
-	tokens        int
-	temperature   float64
-	topP          float64
-	topK          int
-	minP          float64
-	repeatPenalty float64
-	systemPrompt  string
+	tokens           int
+	temperature      float64
+	topP             float64
+	topK             int
+	minP             float64
+	repeatPenalty    float64
+	presencePenalty  float64
+	frequencyPenalty float64
+	systemPrompt     string
 
 	// Server options (require model reload)
 	ctxSize   int
@@ -92,7 +94,8 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 			} else {
 				ui.PrintError("Persona '%s' has no model. Specify one:", args[0])
 				fmt.Printf("  lleme run %s <model> [prompt]\n", args[0])
-				os.Exit(1)
+				ui.ExitFunc(1)
+				return
 			}
 
 			// Apply persona system prompt if not overridden by flag
@@ -123,6 +126,15 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 
 		// Use the resolved full model name
 		modelName := resolvedModel.FullName
+
+		// Look up built-in preset for this model family.
+		activePreset, matchedPattern := presets.Find(modelName)
+		if activePreset != nil {
+			fmt.Println(ui.Muted("Using preset: " + activePreset.Name + " (matched " + matchedPattern + ")"))
+			logs.Info("Applied preset", "name", activePreset.Name, "pattern", matchedPattern, "model", modelName)
+		} else {
+			logs.Debug("No preset matched", "model", modelName)
+		}
 
 		// Track which server options were explicitly set
 		ctxSizeSet := cmd.Flags().Changed("ctx-size")
@@ -161,9 +173,10 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 			if activePersona != nil {
 				personaOpts = activePersona.GetServerOptions()
 			}
-			if ctxSizeSet || gpuLayersSet || threadsSet || personaOpts != nil {
+			mergedOpts := presets.MergeServerOptions(activePreset, personaOpts)
+			if ctxSizeSet || gpuLayersSet || threadsSet || mergedOpts != nil {
 				opts := &server.RunOptions{
-					Options: personaOpts,
+					Options: mergedOpts,
 				}
 				if ctxSizeSet {
 					opts.CtxSize = server.IntPtr(ctxSize)
@@ -179,9 +192,9 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 				}
 			}
 
-			session := NewChatSession(api, modelName, cfg, activePersona)
+			session := NewChatSession(api, modelName, cfg, activePersona, activePreset)
 			session.SetSystemPrompt(systemPrompt)
-			session.SetSamplingOptions(temperature, topP, minP, repeatPenalty, topK, tokens)
+			session.SetSamplingOptions(temperature, topP, minP, repeatPenalty, presencePenalty, frequencyPenalty, topK, tokens)
 			if err := session.Run(promptArg); err != nil {
 				ui.Fatal("Chat failed: %v", err)
 			}
@@ -189,9 +202,9 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 		}
 
 		// Launch TUI for interactive mode
-		m := chat.New(api, modelName, cfg, activePersona, personaName)
+		m := chat.New(api, modelName, cfg, activePersona, activePreset, personaName)
 		m.SetInitialServerOptions(ctxSize, gpuLayers, threads, ctxSizeSet, gpuLayersSet, threadsSet)
-		m.SetSamplingOptions(temperature, topP, minP, repeatPenalty, topK, tokens)
+		m.SetSamplingOptions(temperature, topP, minP, repeatPenalty, presencePenalty, frequencyPenalty, topK, tokens)
 		m.SetSystemPrompt(systemPrompt)
 
 		p := tea.NewProgram(m, tea.WithAltScreen())
@@ -232,9 +245,9 @@ func validateModel(query string, cfg *config.Config) (*proxy.DownloadedModel, er
 	// Ambiguous match - user needs to be more specific
 	if len(result.Matches) > 1 {
 		var b strings.Builder
-		b.WriteString(fmt.Sprintf("'%s' matches multiple models:\n\n", query))
+		fmt.Fprintf(&b, "'%s' matches multiple models:\n\n", query)
 		for _, m := range result.Matches {
-			b.WriteString(fmt.Sprintf("  %s\n", m.FullName))
+			fmt.Fprintf(&b, "  %s\n", m.FullName)
 		}
 		b.WriteString("\nSpecify the full model name to continue")
 		return nil, fmt.Errorf("%s", b.String())
@@ -259,16 +272,39 @@ func validateModel(query string, cfg *config.Config) (*proxy.DownloadedModel, er
 // modelNotFoundError returns a helpful error for models that aren't found
 func modelNotFoundError(query string, suggestions []proxy.DownloadedModel) error {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("no model matches '%s'", query))
+	fmt.Fprintf(&b, "no model matches '%s'", query)
 	if len(suggestions) > 0 {
 		b.WriteString("\n\nDid you mean:\n")
 		for _, s := range suggestions {
-			b.WriteString(fmt.Sprintf("  %s\n", s.FullName))
+			fmt.Fprintf(&b, "  %s\n", s.FullName)
 		}
 	} else {
 		b.WriteString("\n\n  Use 'lleme list' to see downloaded models\n  Use 'lleme search <query>' to find models")
 	}
 	return fmt.Errorf("%s", b.String())
+}
+
+// selectQuant returns the best matching quantization from the available list.
+// If quant is empty, it picks the best available; otherwise it validates the
+// requested quantization exists.
+func selectQuant(quants []hf.Quantization, quant string) (hf.Quantization, error) {
+	if quant == "" {
+		name := hf.GetBestQuantization(quants)
+		q, found := hf.FindQuantization(quants, name)
+		if !found {
+			return hf.Quantization{}, fmt.Errorf("internal error: best quantization %q not found in list", name)
+		}
+		return q, nil
+	}
+	if q, found := hf.FindQuantization(quants, quant); found {
+		return q, nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "quantization '%s' not found\n\nAvailable:\n", quant)
+	for _, q := range hf.SortQuantizations(quants) {
+		fmt.Fprintf(&b, "  %s (%s)\n", q.Name, ui.FormatBytes(q.Size))
+	}
+	return hf.Quantization{}, fmt.Errorf("%s", b.String())
 }
 
 // offerToPull checks HuggingFace and offers to download a model
@@ -300,21 +336,10 @@ func offerToPull(cfg *config.Config, user, repo, quant string) (*proxy.Downloade
 		return nil, fmt.Errorf("'%s/%s' contains no GGUF files", user, repo)
 	}
 
-	// Select quantization
-	if quant == "" {
-		quant = hf.GetBestQuantization(quants)
-	} else {
-		if _, found := hf.FindQuantization(quants, quant); !found {
-			var b strings.Builder
-			b.WriteString(fmt.Sprintf("quantization '%s' not found\n\nAvailable:\n", quant))
-			for _, q := range hf.SortQuantizations(quants) {
-				b.WriteString(fmt.Sprintf("  %s (%s)\n", q.Name, ui.FormatBytes(q.Size)))
-			}
-			return nil, fmt.Errorf("%s", b.String())
-		}
+	selectedQuant, err := selectQuant(quants, quant)
+	if err != nil {
+		return nil, err
 	}
-
-	selectedQuant, _ := hf.FindQuantization(quants, quant)
 
 	// Get manifest info for display (also returns manifest to pass to PullModel)
 	info, manifest, manifestJSON, err := hf.GetManifestInfo(client, user, repo, selectedQuant)
@@ -323,7 +348,7 @@ func offerToPull(cfg *config.Config, user, repo, quant string) (*proxy.Downloade
 	}
 
 	// Download the model
-	modelName := hf.FormatModelName(user, repo, quant)
+	modelName := hf.FormatModelName(user, repo, selectedQuant.Name)
 	if info.IsVision {
 		fmt.Printf("Downloading %s (%s + %s mmproj)...\n",
 			modelName, ui.FormatBytes(info.GGUFSize), ui.FormatBytes(info.MMProjSize))
@@ -338,21 +363,11 @@ func offerToPull(cfg *config.Config, user, repo, quant string) (*proxy.Downloade
 		ManifestJSON: manifestJSON,
 	}
 
-	// Add peer download support if enabled
-	if cfg.Peer.Enabled {
-		opts.PeerDownload = peer.CreateDownloader()
-	}
-
 	result, err := hf.PullModelWithProgressFactory(client, user, repo, selectedQuant, opts, func() hf.ProgressDisplay {
 		return ui.NewProgressBar()
 	})
 	if err != nil {
 		return nil, err
-	}
-
-	// Update peer sharing index
-	if err := peer.RebuildPeerFileIndex(); err != nil {
-		ui.PrintError("Failed to update peer index: %v", err)
 	}
 
 	if result.IsVision {
@@ -366,7 +381,7 @@ func offerToPull(cfg *config.Config, user, repo, quant string) (*proxy.Downloade
 	return &proxy.DownloadedModel{
 		User:      user,
 		Repo:      repo,
-		Quant:     quant,
+		Quant:     selectedQuant.Name,
 		FullName:  modelName,
 		ModelPath: result.ModelPath,
 	}, nil
@@ -451,6 +466,8 @@ func init() {
 	runCmd.Flags().IntVar(&topK, "top-k", 0, "Top-k sampling")
 	runCmd.Flags().Float64Var(&minP, "min-p", 0, "Min-p sampling")
 	runCmd.Flags().Float64Var(&repeatPenalty, "repeat-penalty", 0, "Repeat penalty")
+	runCmd.Flags().Float64Var(&presencePenalty, "presence-penalty", 0, "Presence penalty")
+	runCmd.Flags().Float64Var(&frequencyPenalty, "frequency-penalty", 0, "Frequency penalty")
 	runCmd.Flags().IntVarP(&tokens, "predict", "n", 0, "Max tokens to generate")
 	runCmd.Flags().StringVarP(&systemPrompt, "system", "s", "", "System prompt")
 
