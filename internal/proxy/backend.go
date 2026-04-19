@@ -9,6 +9,13 @@ package proxy
 type Runtime interface {
 	Kind() BackendKind
 
+	// HFAppName returns the HuggingFace "apps=" filter value that lists
+	// models this backend can load (e.g. "llama.cpp" for GGUF,
+	// "mlx-lm" for MLX). The search/trending UI joins the names of all
+	// registered runtimes into one filter so adding a backend doesn't
+	// require editing the discovery surface.
+	HFAppName() string
+
 	// BinaryPath returns the absolute path to the executable.
 	BinaryPath() string
 

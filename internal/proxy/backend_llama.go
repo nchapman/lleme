@@ -25,6 +25,8 @@ func NewLlamaRuntime(appConfig *config.Config) *LlamaRuntime {
 
 func (r *LlamaRuntime) Kind() BackendKind { return BackendKindLlama }
 
+func (r *LlamaRuntime) HFAppName() string { return "llama.cpp" }
+
 func (r *LlamaRuntime) BinaryPath() string { return llama.ServerPath() }
 
 func (r *LlamaRuntime) WorkingDir() string { return config.BinPath() }

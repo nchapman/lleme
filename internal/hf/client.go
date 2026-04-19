@@ -242,12 +242,20 @@ func (c *Client) ListFilesInPath(user, repo, branch, path string) ([]FileTree, e
 	return files, nil
 }
 
-func (c *Client) SearchModels(query string, limit int) ([]SearchResult, error) {
-	// Use models-json endpoint with apps=llama.cpp filter for llama.cpp compatible models
-	searchURL := fmt.Sprintf("%s/models-json?apps=llama.cpp&sort=trending", baseURL)
-	if query != "" {
-		searchURL += "&search=" + url.QueryEscape(query)
+// SearchModels queries HuggingFace's models-json endpoint. apps filters to
+// compatible runtimes (e.g. "llama.cpp", "mlx-lm"); callers typically join
+// the names of all registered backends. An empty apps is allowed but
+// unfiltered results are noisy, so callers should pass something.
+func (c *Client) SearchModels(query string, limit int, apps []string) ([]SearchResult, error) {
+	params := url.Values{}
+	params.Set("sort", "trending")
+	if len(apps) > 0 {
+		params.Set("apps", strings.Join(apps, ","))
 	}
+	if query != "" {
+		params.Set("search", query)
+	}
+	searchURL := fmt.Sprintf("%s/models-json?%s", baseURL, params.Encode())
 	req, err := http.NewRequest("GET", searchURL, nil)
 	if err != nil {
 		return nil, err

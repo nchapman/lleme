@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -139,39 +138,24 @@ Examples:
 		removed := 0
 		var freedSize int64
 		for _, m := range models {
-			// Find the actual model path (handles both single and split files)
-			modelPath := hf.FindModelFile(m.User, m.Repo, m.Quant)
-			if modelPath == "" {
-				modelPath = hf.GetModelFilePath(m.User, m.Repo, m.Quant)
+			local := hf.LocalModel{
+				User:    m.User,
+				Repo:    m.Repo,
+				Quant:   m.Quant,
+				Backend: m.Backend,
+				Path:    m.Path,
+				Size:    m.Size,
 			}
-
-			// Check if this is a split file (stored in a quant subdirectory)
-			splitDir := hf.GetSplitModelDir(m.User, m.Repo, m.Quant)
-			if info, err := os.Stat(splitDir); err == nil && info.IsDir() {
-				// Remove the entire split directory
-				if err := os.RemoveAll(splitDir); err != nil {
-					ui.PrintError("Failed to remove %s: %v", hf.FormatModelName(m.User, m.Repo, m.Quant), err)
-					continue
-				}
-			} else {
-				// Single file - remove it directly
-				if err := os.Remove(modelPath); err != nil {
-					ui.PrintError("Failed to remove %s: %v", hf.FormatModelName(m.User, m.Repo, m.Quant), err)
-					continue
-				}
+			if err := hf.RemoveLocalModel(local); err != nil {
+				ui.PrintError("Failed to remove %s: %v", hf.FormatModelName(m.User, m.Repo, m.Quant), err)
+				continue
 			}
 			freedSize += m.Size
 
-			// Also remove associated files (manifest, mmproj, metadata)
-			// These may not exist; errors are expected and safe to ignore
-			os.Remove(hf.GetManifestFilePath(m.User, m.Repo, m.Quant))
-			os.Remove(hf.GetMMProjFilePath(m.User, m.Repo, m.Quant))
-
-			// Clean up empty directories
+			// Clean up empty directories.
 			modelDir := hf.GetModelPath(m.User, m.Repo)
 			cleanEmptyDir(modelDir)
-			userDir := filepath.Dir(modelDir)
-			cleanEmptyDir(userDir)
+			cleanEmptyDir(filepath.Dir(modelDir))
 
 			removed++
 		}
@@ -185,138 +169,54 @@ Examples:
 	},
 }
 
-// findModels returns models matching the pattern and filters
+// findModels returns models matching the pattern and filters.
 func findModels(pattern string, olderThan time.Duration, largerThan int64) ([]ModelInfo, error) {
 	return findModelsInDir(config.ModelsPath(), pattern, olderThan, largerThan)
 }
 
-// findModelsInDir is the testable version of findModels
+// findModelsInDir is the testable sibling of findModels. It sources the
+// raw inventory from hf.ListLocalModelsInDir (which knows about both GGUF
+// and MLX layouts) and then applies the user-supplied glob + age/size
+// filters on top.
 func findModelsInDir(modelsDir, pattern string, olderThan time.Duration, largerThan int64) ([]ModelInfo, error) {
 	re, err := regexp.Compile("^" + globToRegex(pattern) + "$")
 	if err != nil {
 		return nil, fmt.Errorf("invalid pattern: %s", pattern)
 	}
 
-	w := &modelWalker{
-		modelsDir:  modelsDir,
-		re:         re,
-		olderThan:  olderThan,
-		largerThan: largerThan,
-		seen:       make(map[string]bool),
-	}
-
-	if err := filepath.WalkDir(modelsDir, w.walk); err != nil {
+	locals, err := hf.ListLocalModelsInDir(modelsDir)
+	if err != nil {
 		return nil, err
 	}
-	return w.models, nil
-}
 
-type modelWalker struct {
-	modelsDir  string
-	re         *regexp.Regexp
-	olderThan  time.Duration
-	largerThan int64
-	seen       map[string]bool
-	models     []ModelInfo
-}
-
-func (w *modelWalker) walk(path string, d fs.DirEntry, err error) error {
-	if err != nil {
-		return fmt.Errorf("walk %s: %w", path, err)
-	}
-	if d.IsDir() || filepath.Ext(d.Name()) != ".gguf" {
-		return nil
-	}
-
-	relPath, err := filepath.Rel(w.modelsDir, path)
-	if err != nil {
-		return fmt.Errorf("relative path of %s: %w", path, err)
-	}
-
-	parts := strings.Split(relPath, string(filepath.Separator))
-	if len(parts) < 3 {
-		return nil
-	}
-
-	user, repo := parts[0], parts[1]
-
-	quant, size, skip, err := classifyModelEntry(user, repo, parts, path, d, w.seen)
-	if err != nil {
-		return fmt.Errorf("classify %s: %w", relPath, err)
-	}
-	if skip {
-		return nil
-	}
-
-	if !w.re.MatchString(hf.FormatModelName(user, repo, quant)) && !w.re.MatchString(user+"/"+repo) {
-		return nil
-	}
-
-	lastUsed := modelLastUsed(user, repo, quant, d)
-	if !w.passesFilters(size, lastUsed) {
-		return nil
-	}
-
-	w.models = append(w.models, ModelInfo{
-		User:     user,
-		Repo:     repo,
-		Quant:    quant,
-		Size:     size,
-		LastUsed: lastUsed,
-	})
-	return nil
-}
-
-func (w *modelWalker) passesFilters(size int64, lastUsed time.Time) bool {
-	if w.olderThan > 0 && time.Since(lastUsed) < w.olderThan {
-		return false
-	}
-	if w.largerThan > 0 && size < w.largerThan {
-		return false
-	}
-	return true
-}
-
-// classifyModelEntry determines user/repo/quant/size for a .gguf file during a WalkDir.
-// Returns skip=true when the entry should be ignored (e.g. a duplicate split shard).
-func classifyModelEntry(user, repo string, parts []string, path string, d fs.DirEntry, seenSplitDirs map[string]bool) (quant string, size int64, skip bool, err error) {
-	if len(parts) == 4 && hf.SplitFilePattern.MatchString(d.Name()) {
-		quant = parts[2]
-		key := filepath.Join(user, repo, quant)
-		if seenSplitDirs[key] {
-			return "", 0, true, nil
+	var out []ModelInfo
+	for _, m := range locals {
+		fullName := hf.FormatModelName(m.User, m.Repo, m.Quant)
+		repoName := m.User + "/" + m.Repo
+		if !re.MatchString(fullName) && !re.MatchString(repoName) {
+			continue
 		}
-		seenSplitDirs[key] = true
-
-		entries, _ := os.ReadDir(filepath.Dir(path))
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".gguf") {
-				continue
-			}
-			if info, infoErr := entry.Info(); infoErr == nil {
-				size += info.Size()
-			}
+		lastUsed := m.LastUsed
+		if t := hf.GetLastUsed(m.User, m.Repo, m.Quant); !t.IsZero() {
+			lastUsed = t
 		}
-		return quant, size, false, nil
+		if olderThan > 0 && time.Since(lastUsed) < olderThan {
+			continue
+		}
+		if largerThan > 0 && m.Size < largerThan {
+			continue
+		}
+		out = append(out, ModelInfo{
+			User:     m.User,
+			Repo:     m.Repo,
+			Quant:    m.Quant,
+			Backend:  m.Backend,
+			Path:     m.Path,
+			Size:     m.Size,
+			LastUsed: lastUsed,
+		})
 	}
-
-	quant = strings.TrimSuffix(d.Name(), ".gguf")
-	info, err := d.Info()
-	if err != nil {
-		return "", 0, false, err
-	}
-	return quant, info.Size(), false, nil
-}
-
-// modelLastUsed returns the last-used time for a model, falling back to mtime.
-func modelLastUsed(user, repo, quant string, d fs.DirEntry) time.Time {
-	if t := hf.GetLastUsed(user, repo, quant); !t.IsZero() {
-		return t
-	}
-	if info, err := d.Info(); err == nil {
-		return info.ModTime()
-	}
-	return time.Now()
+	return out, nil
 }
 
 // globToRegex converts a glob pattern to a regex pattern

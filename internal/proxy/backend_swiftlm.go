@@ -28,6 +28,8 @@ func NewSwiftLMRuntime(appConfig *config.Config) *SwiftLMRuntime {
 
 func (r *SwiftLMRuntime) Kind() BackendKind { return BackendKindMLX }
 
+func (r *SwiftLMRuntime) HFAppName() string { return "mlx-lm" }
+
 func (r *SwiftLMRuntime) BinaryPath() string { return swiftlm.ServerPath() }
 
 // WorkingDir points at the versioned SwiftLM directory so the binary finds
