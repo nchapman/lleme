@@ -1,9 +1,11 @@
 name: Qwen3 Instruct
-source: https://unsloth.ai/docs/models/qwen3.5.md
+source: https://unsloth.ai/docs/models/qwen3.6.md
 match:
   - "*/Qwen3*-Instruct*"
   - "*/Qwen3.*-Instruct*"
   - "*/qwen3*-instruct*"
+  - "*/Qwen3.5*"
+  - "*/Qwen3.6*"
 options:
   temp: 0.7
   top-p: 0.8

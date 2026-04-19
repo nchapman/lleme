@@ -1,0 +1,10 @@
+name: GLM-4.7 Flash
+source: https://unsloth.ai/docs/models/glm-4.7-flash.md
+match:
+  - "*/GLM-4*Flash*"
+  - "*/glm-4*flash*"
+options:
+  temp: 1.0
+  top-p: 0.95
+  # min_p must be set to 0.01; llama.cpp default of 0.05 degrades output quality
+  min-p: 0.01

@@ -74,6 +74,31 @@ func TestFind(t *testing.T) {
 			modelName: "bartowski/Qwen3-4B-Instruct-GGUF",
 			wantName:  "Qwen3 Instruct",
 		},
+		{
+			name:      "Qwen3.5 bare repo (no Instruct suffix)",
+			modelName: "unsloth/Qwen3.5-27B-GGUF:UD-Q4_K_XL",
+			wantName:  "Qwen3 Instruct",
+		},
+		{
+			name:      "Qwen3.6 MoE",
+			modelName: "unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_XL",
+			wantName:  "Qwen3 Instruct",
+		},
+		{
+			name:      "GLM-4.7 Flash",
+			modelName: "unsloth/GLM-4.7-Flash-GGUF:UD-Q4_K_XL",
+			wantName:  "GLM-4.7 Flash",
+		},
+		{
+			name:      "GPT OSS 20B",
+			modelName: "unsloth/gpt-oss-20b-GGUF:Q4_K_M",
+			wantName:  "GPT OSS",
+		},
+		{
+			name:      "GPT OSS 120B",
+			modelName: "openai/gpt-oss-120b:Q4_K_M",
+			wantName:  "GPT OSS",
+		},
 	}
 
 	for _, tt := range tests {
