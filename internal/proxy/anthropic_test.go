@@ -1222,38 +1222,63 @@ func TestTranslateAnthropicRequest_DocumentBlockRejected(t *testing.T) {
 	}
 }
 
-// Extended-thinking and redacted_thinking blocks are advisory; we drop
-// them from the translated request rather than reject, so an assistant
-// turn that carries them (from an earlier round with a reasoning-enabled
-// model) still gets through to backends that don't understand them.
-func TestTranslateAnthropicRequest_ThinkingBlockDropped(t *testing.T) {
-	for _, blockType := range []string{"thinking", "redacted_thinking"} {
-		t.Run(blockType, func(t *testing.T) {
-			body := []byte(`{
-				"model": "m",
-				"max_tokens": 5,
-				"messages": [{
-					"role": "assistant",
-					"content": [
-						{"type": "` + blockType + `", "thinking": "secret"},
-						{"type": "text", "text": "final answer"}
-					]
-				}]
-			}`)
-			out, _, err := translateAnthropicRequest(body)
-			if err != nil {
-				t.Fatalf("thinking block should be dropped, got err: %v", err)
-			}
-			// The thinking text must not leak into the backend request;
-			// only the surrounding text block remains.
-			if bytes.Contains(out, []byte("secret")) {
-				t.Errorf("thinking content leaked into translated request: %s", out)
-			}
-			if !bytes.Contains(out, []byte("final answer")) {
-				t.Errorf("surrounding text dropped: %s", out)
-			}
-		})
-	}
+// Prior-turn thinking blocks are concatenated into reasoning_content on the
+// upstream assistant message — matches llama.cpp's /v1/messages translator,
+// which feeds this through the chat template's reasoning slot so reasoning-
+// aware models see their own prior chain of thought. redacted_thinking is
+// encrypted Anthropic-server state with no plaintext to replay, so it's
+// dropped; its payload must never leak into reasoning_content.
+func TestTranslateAnthropicRequest_ThinkingBlockHandling(t *testing.T) {
+	t.Run("thinking forwarded to reasoning_content", func(t *testing.T) {
+		body := []byte(`{
+			"model": "m",
+			"max_tokens": 5,
+			"messages": [{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "secret"},
+					{"type": "text", "text": "final answer"}
+				]
+			}]
+		}`)
+		out, _, err := translateAnthropicRequest(body)
+		if err != nil {
+			t.Fatalf("translate: %v", err)
+		}
+		if !bytes.Contains(out, []byte(`"reasoning_content":"secret"`)) {
+			t.Errorf("thinking must forward as reasoning_content: %s", out)
+		}
+		if !bytes.Contains(out, []byte("final answer")) {
+			t.Errorf("surrounding text dropped: %s", out)
+		}
+	})
+
+	t.Run("redacted_thinking dropped", func(t *testing.T) {
+		body := []byte(`{
+			"model": "m",
+			"max_tokens": 5,
+			"messages": [{
+				"role": "assistant",
+				"content": [
+					{"type": "redacted_thinking", "data": "ENCRYPTED"},
+					{"type": "text", "text": "final answer"}
+				]
+			}]
+		}`)
+		out, _, err := translateAnthropicRequest(body)
+		if err != nil {
+			t.Fatalf("translate: %v", err)
+		}
+		if bytes.Contains(out, []byte("ENCRYPTED")) {
+			t.Errorf("redacted_thinking payload must not leak: %s", out)
+		}
+		if bytes.Contains(out, []byte("reasoning_content")) {
+			t.Errorf("redacted_thinking must not produce reasoning_content: %s", out)
+		}
+		if !bytes.Contains(out, []byte("final answer")) {
+			t.Errorf("surrounding text dropped: %s", out)
+		}
+	})
 }
 
 // Anthropic supports `source.type: "url"` for images, but llama-server and
@@ -1556,5 +1581,359 @@ func TestTranslateOpenAIResponse_StopSequenceNullPresent(t *testing.T) {
 	// be present, not omitted. A struct decode would silently hide omission.
 	if !strings.Contains(string(out), `"stop_sequence":null`) {
 		t.Errorf(`response should include "stop_sequence":null key; got %s`, string(out))
+	}
+}
+
+// --- Reasoning / thinking passthrough ---
+
+// Streaming reasoning_content must surface as an Anthropic thinking content
+// block with thinking_delta events. Shape mirrors llama.cpp's native
+// /v1/messages output so clients (Claude Code, aider) that already handle
+// extended-thinking from Anthropic's API render it without special casing.
+func TestTranslateAnthropicStream_ThinkingBlock(t *testing.T) {
+	upstream := strings.Join([]string{
+		`data: {"id":"c","model":"m","choices":[{"index":0,"delta":{"reasoning_content":"Let me "}}]}`,
+		`data: {"id":"c","model":"m","choices":[{"index":0,"delta":{"reasoning_content":"think..."}}]}`,
+		`data: {"id":"c","model":"m","choices":[{"index":0,"delta":{"content":"Answer"}}]}`,
+		`data: {"id":"c","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`,
+		`data: [DONE]`,
+		"",
+	}, "\n\n")
+
+	var buf bytes.Buffer
+	if err := translateAnthropicStream(&buf, strings.NewReader(upstream), "msg_1", "m"); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	events := decodeSSE(t, buf.String())
+
+	// Find the first two content_block_start events and confirm thinking
+	// comes before text.
+	var starts []sseEvent
+	for _, e := range events {
+		if e.name == "content_block_start" {
+			starts = append(starts, e)
+		}
+	}
+	if len(starts) < 2 {
+		t.Fatalf("want >=2 content_block_start events, got %d\n%s", len(starts), buf.String())
+	}
+	if !strings.Contains(starts[0].data, `"type":"thinking"`) {
+		t.Errorf("first content_block_start should be thinking, got: %s", starts[0].data)
+	}
+	if !strings.Contains(starts[0].data, `"index":0`) {
+		t.Errorf("thinking block should be at index 0, got: %s", starts[0].data)
+	}
+	// signature is a non-streaming-only field; llama.cpp's streaming
+	// content_block_start omits it, so we match that shape.
+	if strings.Contains(starts[0].data, `"signature"`) {
+		t.Errorf("streaming content_block_start for thinking must not include signature, got: %s", starts[0].data)
+	}
+	if !strings.Contains(starts[1].data, `"type":"text"`) || !strings.Contains(starts[1].data, `"index":1`) {
+		t.Errorf("second content_block_start should be text at index 1, got: %s", starts[1].data)
+	}
+
+	// thinking_delta frames must carry the reasoning fragments in order.
+	wantThinkingFrags := []string{`"thinking":"Let me "`, `"thinking":"think..."`}
+	var thinkingIdx int
+	for _, e := range events {
+		if e.name != "content_block_delta" {
+			continue
+		}
+		if !strings.Contains(e.data, `"type":"thinking_delta"`) {
+			continue
+		}
+		if thinkingIdx >= len(wantThinkingFrags) {
+			t.Fatalf("unexpected extra thinking_delta: %s", e.data)
+		}
+		if !strings.Contains(e.data, wantThinkingFrags[thinkingIdx]) {
+			t.Errorf("thinking_delta[%d]: want %s in %s", thinkingIdx, wantThinkingFrags[thinkingIdx], e.data)
+		}
+		thinkingIdx++
+	}
+	if thinkingIdx != len(wantThinkingFrags) {
+		t.Errorf("got %d thinking_delta events, want %d", thinkingIdx, len(wantThinkingFrags))
+	}
+
+	// Both blocks must be stopped, in allocation order.
+	var stops []string
+	for _, e := range events {
+		if e.name == "content_block_stop" {
+			stops = append(stops, e.data)
+		}
+	}
+	if len(stops) != 2 {
+		t.Fatalf("want 2 content_block_stop, got %d: %v", len(stops), stops)
+	}
+	if !strings.Contains(stops[0], `"index":0`) || !strings.Contains(stops[1], `"index":1`) {
+		t.Errorf("content_block_stop order wrong: %v", stops)
+	}
+}
+
+// Reasoning-only stream (model reasons but emits no final content) must
+// still finalize cleanly with a stopped thinking block.
+func TestTranslateAnthropicStream_ThinkingOnly(t *testing.T) {
+	upstream := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"reasoning_content":"thinking"}}]}`,
+		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		"",
+	}, "\n\n")
+
+	var buf bytes.Buffer
+	if err := translateAnthropicStream(&buf, strings.NewReader(upstream), "msg_x", "m"); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, `"type":"thinking"`) {
+		t.Errorf("expected thinking block in output:\n%s", got)
+	}
+	if !strings.Contains(got, `"type":"thinking_delta"`) {
+		t.Errorf("expected thinking_delta in output:\n%s", got)
+	}
+	if !strings.Contains(got, "event: content_block_stop") {
+		t.Errorf("expected content_block_stop:\n%s", got)
+	}
+	if !strings.Contains(got, "event: message_stop") {
+		t.Errorf("expected message_stop:\n%s", got)
+	}
+}
+
+// Non-streaming: reasoning_content on the response message must surface as a
+// thinking content block prepended before text. Matches llama.cpp's native
+// /v1/messages block ordering.
+func TestTranslateOpenAIResponse_ThinkingBlock(t *testing.T) {
+	openAI := `{
+		"model": "m",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": "The answer is 42.",
+				"reasoning_content": "Let me compute this step by step."
+			},
+			"finish_reason": "stop"
+		}],
+		"usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+	}`
+	out, err := translateOpenAIResponse([]byte(openAI), "msg_abc")
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var got anthropicMessagesResponse
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Content) != 2 {
+		t.Fatalf("want 2 content blocks (thinking, text), got %d: %+v", len(got.Content), got.Content)
+	}
+	if got.Content[0].Type != "thinking" {
+		t.Errorf("content[0].type = %q, want thinking", got.Content[0].Type)
+	}
+	if got.Content[0].Thinking != "Let me compute this step by step." {
+		t.Errorf("content[0].thinking = %q", got.Content[0].Thinking)
+	}
+	if got.Content[0].Signature == nil || *got.Content[0].Signature != "" {
+		t.Errorf("content[0].signature should be empty string (not nil/absent), got %v", got.Content[0].Signature)
+	}
+	if got.Content[1].Type != "text" || got.Content[1].Text != "The answer is 42." {
+		t.Errorf("content[1] = %+v, want text block", got.Content[1])
+	}
+
+	// Signature must serialize on the wire with an explicit empty string
+	// (matches llama.cpp's /v1/messages output). omitempty on the pointer
+	// would drop it if left nil.
+	if !strings.Contains(string(out), `"signature":""`) {
+		t.Errorf("raw output missing `\"signature\":\"\"`:\n%s", string(out))
+	}
+}
+
+// Response-level thinking only (rare but valid): reasoning_content set,
+// content empty, no tool calls. Matches llama.cpp's native /v1/messages
+// behavior — the empty text block is suppressed when thinking fills the turn.
+func TestTranslateOpenAIResponse_ThinkingWithoutText(t *testing.T) {
+	openAI := `{
+		"model": "m",
+		"choices": [{
+			"index": 0,
+			"message": {"role": "assistant", "content": "", "reasoning_content": "pondered"},
+			"finish_reason": "stop"
+		}],
+		"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+	}`
+	out, err := translateOpenAIResponse([]byte(openAI), "msg_x")
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var got anthropicMessagesResponse
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Matches llama.cpp: an empty text block is not appended when thinking
+	// already fills the turn. Only the thinking block should be present.
+	if len(got.Content) != 1 || got.Content[0].Type != "thinking" {
+		t.Errorf("want [thinking] only, got: %+v", got.Content)
+	}
+}
+
+// Request-side: Anthropic thinking.budget_tokens must forward to the
+// OpenAI payload as top-level thinking_budget_tokens. Mirrors llama.cpp's
+// own /v1/messages handling so requests reach llama-server's reasoning
+// sampler with the same knob value.
+func TestTranslateAnthropicRequest_ThinkingBudget(t *testing.T) {
+	tests := []struct {
+		name      string
+		thinking  string
+		wantField bool
+		wantValue int
+	}{
+		{
+			name:      "enabled with budget",
+			thinking:  `{"type":"enabled","budget_tokens":4096}`,
+			wantField: true,
+			wantValue: 4096,
+		},
+		{
+			name:      "disabled",
+			thinking:  `{"type":"disabled"}`,
+			wantField: false,
+		},
+		{
+			name:      "enabled without budget",
+			thinking:  `{"type":"enabled"}`,
+			wantField: false,
+		},
+		{
+			name:      "absent",
+			thinking:  "",
+			wantField: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var thinkingField string
+			if tc.thinking != "" {
+				thinkingField = `,"thinking":` + tc.thinking
+			}
+			body := `{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}]` + thinkingField + `}`
+			out, _, err := translateAnthropicRequest([]byte(body))
+			if err != nil {
+				t.Fatalf("translate: %v", err)
+			}
+			var got openAIChatRequest
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if tc.wantField {
+				if got.ThinkingBudgetTokens == nil {
+					t.Fatalf("thinking_budget_tokens absent; want %d", tc.wantValue)
+				}
+				if *got.ThinkingBudgetTokens != tc.wantValue {
+					t.Errorf("thinking_budget_tokens = %d, want %d", *got.ThinkingBudgetTokens, tc.wantValue)
+				}
+			} else {
+				if got.ThinkingBudgetTokens != nil {
+					t.Errorf("thinking_budget_tokens should be absent, got %d", *got.ThinkingBudgetTokens)
+				}
+				if strings.Contains(string(out), "thinking_budget_tokens") {
+					t.Errorf("wire output should not contain thinking_budget_tokens: %s", string(out))
+				}
+			}
+		})
+	}
+}
+
+// Assistant-history thinking blocks must be concatenated into
+// reasoning_content on the upstream assistant message — matches llama.cpp's
+// /v1/messages translator so reasoning-aware chat templates (Qwen3,
+// DeepSeek-R1, GLM-4.5) render prior chain-of-thought on multi-turn
+// extended-thinking conversations. redacted_thinking is drop-only.
+func TestTranslateAnthropicRequest_AssistantThinkingForwarded(t *testing.T) {
+	body := `{
+		"model": "m",
+		"max_tokens": 16,
+		"messages": [
+			{"role": "user", "content": "2+2?"},
+			{"role": "assistant", "content": [
+				{"type": "thinking", "thinking": "pondering...", "signature": "sig"},
+				{"type": "redacted_thinking", "data": "ENCRYPTED"},
+				{"type": "text", "text": "4"}
+			]},
+			{"role": "user", "content": "thanks"}
+		]
+	}`
+	out, _, err := translateAnthropicRequest([]byte(body))
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var got openAIChatRequest
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	var assistant *openAIMessage
+	for i := range got.Messages {
+		if got.Messages[i].Role == "assistant" {
+			assistant = &got.Messages[i]
+			break
+		}
+	}
+	if assistant == nil {
+		t.Fatalf("no assistant message in translated request:\n%s", string(out))
+	}
+	if assistant.ReasoningContent != "pondering..." {
+		t.Errorf("reasoning_content = %q, want %q", assistant.ReasoningContent, "pondering...")
+	}
+	if !strings.Contains(string(assistant.Content), `4`) {
+		t.Errorf("assistant text must survive: %s", string(assistant.Content))
+	}
+	// redacted_thinking carries no plaintext; its placeholder payload must
+	// not leak into reasoning_content.
+	if strings.Contains(assistant.ReasoningContent, "ENCRYPTED") {
+		t.Errorf("redacted_thinking data must not leak into reasoning_content: %q", assistant.ReasoningContent)
+	}
+}
+
+// Non-streaming: reasoning_content + tool_calls with no text content must
+// produce [thinking, tool_use] with no empty text block — matches
+// llama.cpp's behavior of skipping empty text when the turn is already
+// filled by other block types.
+func TestTranslateOpenAIResponse_ThinkingPlusToolCall(t *testing.T) {
+	openAI := `{
+		"model": "m",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": "",
+				"reasoning_content": "Should call fetch.",
+				"tool_calls": [{
+					"id": "call_1",
+					"type": "function",
+					"function": {"name": "fetch", "arguments": "{\"url\":\"https://x\"}"}
+				}]
+			},
+			"finish_reason": "tool_calls"
+		}],
+		"usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18}
+	}`
+	out, err := translateOpenAIResponse([]byte(openAI), "msg_abc")
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var got anthropicMessagesResponse
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Content) != 2 {
+		t.Fatalf("want 2 blocks [thinking, tool_use], got %d: %+v", len(got.Content), got.Content)
+	}
+	if got.Content[0].Type != "thinking" {
+		t.Errorf("content[0].type = %q, want thinking", got.Content[0].Type)
+	}
+	if got.Content[1].Type != "tool_use" {
+		t.Errorf("content[1].type = %q, want tool_use", got.Content[1].Type)
+	}
+	if got.StopReason != "tool_use" {
+		t.Errorf("stop_reason = %q, want tool_use", got.StopReason)
 	}
 }

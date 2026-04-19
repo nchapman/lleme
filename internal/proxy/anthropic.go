@@ -20,9 +20,18 @@ package proxy
 //   - Streaming: tool_call deltas accumulate per OpenAI tool index into their
 //     own Anthropic content_block index; function.arguments fragments become
 //     input_json_delta partial_json events that SDK accumulators reassemble.
-//   - Extended-thinking blocks (thinking, redacted_thinking): dropped rather
-//     than rejected. They're advisory; backends that don't understand them
-//     would reject the message. Document blocks remain rejected.
+//   - Reasoning / extended-thinking: output-side passthrough. Backend
+//     reasoning_content (llama-server --reasoning-format deepseek; SwiftLM
+//     --thinking) translates to Anthropic thinking content blocks in both
+//     streaming (thinking_delta events) and non-streaming paths. Request-
+//     level `thinking: {type:"enabled", budget_tokens:N}` forwards as
+//     top-level `thinking_budget_tokens` (honored by llama-server, ignored
+//     by SwiftLM). Input-side thinking blocks in prior assistant messages
+//     are concatenated into `reasoning_content` on the OpenAI message —
+//     matches llama.cpp's own /v1/messages translator so reasoning-aware
+//     chat templates render prior chain-of-thought for multi-turn extended-
+//     thinking conversations. `redacted_thinking` is drop-only (no plaintext
+//     to replay; we never emit it either). Document blocks remain rejected.
 //   - Error translation: upstream error types map to Anthropic's enum via
 //     normalizeAnthropicErrorType; upstream HTTP status codes map via
 //     anthropicErrorTypeForStatus. SDK consumers never see backend-specific
@@ -73,6 +82,7 @@ type anthropicMessagesRequest struct {
 	Stream        bool               `json:"stream,omitempty"`
 	Tools         []anthropicTool    `json:"tools,omitempty"`
 	ToolChoice    json.RawMessage    `json:"tool_choice,omitempty"` // object shape varies; parsed separately
+	Thinking      json.RawMessage    `json:"thinking,omitempty"`    // {type:"enabled"|"disabled", budget_tokens:N}
 	Metadata      json.RawMessage    `json:"metadata,omitempty"`    // ignored
 }
 
@@ -105,6 +115,11 @@ type anthropicContentBlock struct {
 	ToolUseID   string          `json:"tool_use_id,omitempty"`
 	ToolContent json.RawMessage `json:"content,omitempty"`
 	ToolIsError bool            `json:"is_error,omitempty"`
+
+	// thinking (assistant-authored; appears in prior-turn history). The
+	// `signature` field on the same block is intentionally unmodeled —
+	// signatures are opaque Anthropic-server state with no local meaning.
+	Thinking string `json:"thinking,omitempty"`
 }
 
 type anthropicImageSource struct {
@@ -134,6 +149,13 @@ type anthropicResponseContent struct {
 	ID    string          `json:"id,omitempty"`
 	Name  string          `json:"name,omitempty"`
 	Input json.RawMessage `json:"input,omitempty"`
+
+	// thinking blocks. Signature is emitted as an empty string on local-model
+	// output (no verifiable-thinking state to stamp) to match the shape
+	// llama.cpp's native /v1/messages endpoint produces. Pointer so text/
+	// tool_use blocks leave it absent rather than emitting an empty field.
+	Thinking  string  `json:"thinking,omitempty"`
+	Signature *string `json:"signature,omitempty"`
 }
 
 type anthropicUsage struct {
@@ -144,17 +166,18 @@ type anthropicUsage struct {
 // --- OpenAI types we produce / consume ---
 
 type openAIChatRequest struct {
-	Model         string            `json:"model"`
-	Messages      []openAIMessage   `json:"messages"`
-	MaxTokens     int               `json:"max_tokens,omitempty"`
-	Temperature   *float64          `json:"temperature,omitempty"`
-	TopP          *float64          `json:"top_p,omitempty"`
-	TopK          *int              `json:"top_k,omitempty"`
-	Stop          []string          `json:"stop,omitempty"`
-	Stream        bool              `json:"stream,omitempty"`
-	StreamOptions *openAIStreamOpts `json:"stream_options,omitempty"`
-	Tools         []openAITool      `json:"tools,omitempty"`
-	ToolChoice    json.RawMessage   `json:"tool_choice,omitempty"`
+	Model                string            `json:"model"`
+	Messages             []openAIMessage   `json:"messages"`
+	MaxTokens            int               `json:"max_tokens,omitempty"`
+	Temperature          *float64          `json:"temperature,omitempty"`
+	TopP                 *float64          `json:"top_p,omitempty"`
+	TopK                 *int              `json:"top_k,omitempty"`
+	Stop                 []string          `json:"stop,omitempty"`
+	Stream               bool              `json:"stream,omitempty"`
+	StreamOptions        *openAIStreamOpts `json:"stream_options,omitempty"`
+	Tools                []openAITool      `json:"tools,omitempty"`
+	ToolChoice           json.RawMessage   `json:"tool_choice,omitempty"`
+	ThinkingBudgetTokens *int              `json:"thinking_budget_tokens,omitempty"`
 }
 
 type openAITool struct {
@@ -180,6 +203,11 @@ type openAIMessage struct {
 	Content    json.RawMessage  `json:"content,omitempty"` // string or multimodal array; may be absent for assistant tool_calls
 	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"` // set when Role == "tool"
+	// ReasoningContent is the DeepSeek-convention field both llama-server
+	// (--reasoning-format deepseek, default) and SwiftLM (--thinking) emit
+	// on non-streaming assistant responses. Output-only: we don't forward
+	// it back as input because neither backend accepts it there.
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 type openAIToolCall struct {
@@ -258,6 +286,10 @@ type openAIDelta struct {
 	Role      string                `json:"role,omitempty"`
 	Content   string                `json:"content,omitempty"`
 	ToolCalls []openAIToolCallDelta `json:"tool_calls,omitempty"`
+	// ReasoningContent carries the reasoning (a.k.a. thinking) delta the
+	// backend extracted from <think> tags. Streaming-side counterpart to
+	// openAIMessage.ReasoningContent; translated to Anthropic thinking_delta.
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 // openAIToolCallDelta is the per-chunk slice of a tool call. id / type /
@@ -352,6 +384,9 @@ func translateAnthropicRequest(body []byte) (openAIBody []byte, stream bool, err
 	}
 	if err := applySystem(&req, &out); err != nil {
 		return nil, false, err
+	}
+	if budget, ok := parseAnthropicThinking(req.Thinking); ok {
+		out.ThinkingBudgetTokens = &budget
 	}
 	for i, m := range req.Messages {
 		translated, err := translateAnthropicMessage(m)
@@ -506,6 +541,33 @@ func translateAnthropicToolChoice(raw json.RawMessage) (json.RawMessage, error) 
 	return nil, newBadRequest(fmt.Sprintf("tool_choice: unsupported type %q", tc.Type))
 }
 
+// parseAnthropicThinking extracts the budget from Anthropic's request-level
+// thinking control: `{"type":"enabled", "budget_tokens": N}`. Returns ok=true
+// only when type=="enabled" and a budget is given.
+//
+// Mirrors llama.cpp's own /v1/messages handling: `thinking.budget_tokens` is
+// forwarded as top-level `thinking_budget_tokens` on the chat-completions
+// payload. llama-server honors it via the reasoning sampler; SwiftLM
+// tolerates unknown fields. Malformed / disabled / absent → ok=false (silent
+// forward-compat, consistent with how other unknown top-level fields are
+// tolerated by this proxy).
+func parseAnthropicThinking(raw json.RawMessage) (int, bool) {
+	if !rawJSONPresent(raw) {
+		return 0, false
+	}
+	var t struct {
+		Type         string `json:"type"`
+		BudgetTokens *int   `json:"budget_tokens,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &t); err != nil {
+		return 0, false
+	}
+	if t.Type != "enabled" || t.BudgetTokens == nil {
+		return 0, false
+	}
+	return *t.BudgetTokens, true
+}
+
 // flattenAnthropicSystem accepts either a JSON string or an array of
 // {type:"text", text:"..."} blocks and returns the concatenated text.
 func flattenAnthropicSystem(raw json.RawMessage) (string, error) {
@@ -563,6 +625,7 @@ func translateAnthropicMessage(m anthropicMessage) ([]openAIMessage, error) {
 // assistant message.
 func translateAssistantBlocks(blocks []anthropicContentBlock) ([]openAIMessage, error) {
 	var textParts []string
+	var reasoningParts []string
 	var toolCalls []openAIToolCall
 	for _, b := range blocks {
 		switch b.Type {
@@ -584,9 +647,19 @@ func translateAssistantBlocks(blocks []anthropicContentBlock) ([]openAIMessage, 
 					Arguments: args,
 				},
 			})
-		case "thinking", "redacted_thinking":
-			// Drop — upstream reasoning markers that aren't part of the
-			// conversation the backend needs to see.
+		case "thinking":
+			// Concatenate prior-turn thinking text into reasoning_content on
+			// the assistant message. Matches llama.cpp's native /v1/messages
+			// → chat-completions translation (server-common.cpp:1577). The
+			// chat template renders it via the reasoning slot (Qwen3,
+			// DeepSeek-R1, GLM-4.5) so the model sees its own prior chain of
+			// thought on multi-turn extended-thinking conversations. SwiftLM
+			// ignores unknown message fields, so this is safe there too.
+			reasoningParts = append(reasoningParts, b.Thinking)
+		case "redacted_thinking":
+			// Drop entirely — encrypted Anthropic-server-only state with no
+			// plaintext we can replay into a local model. Output is never
+			// produced either; drop-only by design.
 		default:
 			return nil, fmt.Errorf("unsupported assistant content block type %q", b.Type)
 		}
@@ -595,6 +668,9 @@ func translateAssistantBlocks(blocks []anthropicContentBlock) ([]openAIMessage, 
 	if len(textParts) > 0 {
 		raw, _ := json.Marshal(strings.Join(textParts, ""))
 		msg.Content = raw
+	}
+	if len(reasoningParts) > 0 {
+		msg.ReasoningContent = strings.Join(reasoningParts, "")
 	}
 	msg.ToolCalls = toolCalls
 	return []openAIMessage{msg}, nil
@@ -741,12 +817,26 @@ func translateOpenAIResponse(body []byte, messageID string) ([]byte, error) {
 		return nil, err
 	}
 
-	// Build content blocks: text first (if any), then tool_use blocks for
-	// each tool_call. Omit the text block when there's no text AND there
-	// are tool calls — a bare tool_use response shouldn't carry an empty
-	// assistant turn.
+	// Build content blocks: thinking first (if any), then text (if any),
+	// then tool_use blocks. Thinking-before-text mirrors llama.cpp's native
+	// /v1/messages output shape. Omit the text block when there's no text
+	// AND there are tool calls — a bare tool_use response shouldn't carry
+	// an empty assistant turn.
 	var content []anthropicResponseContent
-	if text != "" || len(choice.Message.ToolCalls) == 0 {
+	reasoning := choice.Message.ReasoningContent
+	if reasoning != "" {
+		empty := ""
+		content = append(content, anthropicResponseContent{
+			Type:      "thinking",
+			Thinking:  reasoning,
+			Signature: &empty,
+		})
+	}
+	// Emit a text block when there's actual text, OR when nothing else
+	// (thinking, tools) will carry the response — so an Anthropic message
+	// always has ≥1 content block. This matches llama.cpp's behavior of
+	// skipping empty text when thinking or tool_use fills the turn.
+	if text != "" || (reasoning == "" && len(choice.Message.ToolCalls) == 0) {
 		content = append(content, anthropicResponseContent{Type: "text", Text: text})
 	}
 	for _, tc := range choice.Message.ToolCalls {
@@ -905,6 +995,8 @@ type streamState struct {
 	started        bool // emitted message_start
 	textOpen       bool // text content block (Anthropic index = textIndex) started
 	textIndex      int  // Anthropic content_block index for the text block
+	thinkingOpen   bool // thinking content block started
+	thinkingIndex  int  // Anthropic content_block index for the thinking block
 	nextBlockIndex int  // next Anthropic content_block index to allocate
 
 	// openAI tool_call.index → Anthropic content_block index
@@ -987,6 +1079,37 @@ func (s *streamState) ensureTextBlock() error {
 		"type":          "content_block_start",
 		"index":         s.textIndex,
 		"content_block": map[string]string{"type": "text", "text": ""},
+	})
+}
+
+// ensureThinkingBlock emits content_block_start for a thinking block on
+// first use. Shape mirrors llama.cpp's native /v1/messages streaming output:
+// `{type:"thinking", thinking:""}` — signature is omitted here (non-streaming-
+// only in the reference), then followed by thinking_delta frames. Allocated
+// lazily so models that don't emit reasoning_content never produce a
+// thinking block.
+func (s *streamState) ensureThinkingBlock() error {
+	if s.thinkingOpen {
+		return nil
+	}
+	if err := s.ensureMessageStarted(); err != nil {
+		return err
+	}
+	s.thinkingIndex = s.nextBlockIndex
+	s.nextBlockIndex++
+	s.thinkingOpen = true
+	s.openBlocks[s.thinkingIndex] = true
+	// Signature is intentionally absent on the streaming start event — it's
+	// a non-streaming-only field in llama.cpp's reference output (see
+	// tools/server/server-task.cpp:to_json_anthropic_stream). SDK stream
+	// accumulators don't consume it here; emitting it would be a deviation.
+	return s.writeEvent("content_block_start", map[string]any{
+		"type":  "content_block_start",
+		"index": s.thinkingIndex,
+		"content_block": map[string]string{
+			"type":     "thinking",
+			"thinking": "",
+		},
 	})
 }
 
@@ -1099,6 +1222,13 @@ func (s *streamState) applyChunk(chunk *openAIStreamChunk) error {
 		s.completionTokens = chunk.Usage.CompletionTokens
 	}
 	for _, c := range chunk.Choices {
+		// Reasoning first: llama-server and SwiftLM emit reasoning_content
+		// before content, so this ordering also keeps the allocated
+		// content_block indices stable (thinking=0, text=1 on a typical
+		// reasoning turn) to match the non-streaming response shape.
+		if err := s.applyReasoningDelta(c.Delta.ReasoningContent); err != nil {
+			return err
+		}
 		if err := s.applyTextDelta(c.Delta.Content); err != nil {
 			return err
 		}
@@ -1113,6 +1243,23 @@ func (s *streamState) applyChunk(chunk *openAIStreamChunk) error {
 		}
 	}
 	return nil
+}
+
+// applyReasoningDelta emits a thinking_delta Anthropic event for each chunk
+// of backend reasoning_content. Shape mirrors llama.cpp's native
+// /v1/messages streaming: `{type:"thinking_delta", thinking: <text>}`.
+func (s *streamState) applyReasoningDelta(text string) error {
+	if text == "" {
+		return nil
+	}
+	if err := s.ensureThinkingBlock(); err != nil {
+		return err
+	}
+	return s.writeEvent("content_block_delta", map[string]any{
+		"type":  "content_block_delta",
+		"index": s.thinkingIndex,
+		"delta": map[string]string{"type": "thinking_delta", "thinking": text},
+	})
 }
 
 func (s *streamState) applyTextDelta(text string) error {
