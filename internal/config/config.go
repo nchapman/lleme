@@ -56,7 +56,17 @@ type HuggingFace struct {
 
 type LlamaCpp struct {
 	ServerPath string         `yaml:"server_path,omitempty"`
+	AutoUpdate *bool          `yaml:"auto_update,omitempty"`
 	Options    map[string]any `yaml:"options,omitempty"`
+}
+
+// AutoUpdateEnabled reports whether background llama.cpp updates are enabled.
+// Defaults to true when unset so fresh installs stay current without manual action.
+func (c *LlamaCpp) AutoUpdateEnabled() bool {
+	if c.AutoUpdate == nil {
+		return true
+	}
+	return *c.AutoUpdate
 }
 
 type Server struct {
@@ -175,6 +185,11 @@ server:
 llamacpp:
   # Path to llama-server binary (empty = auto-detect)
   # server_path: ""
+
+  # Auto-update llama.cpp in the background on server start (default: true)
+  # llama.cpp ships frequently; newer builds fix issues with newly released
+  # models. Disable if you want to pin a known-good version.
+  # auto_update: true
 
   # Any llama-server options can be added here.
   # Uncomment and modify as needed:

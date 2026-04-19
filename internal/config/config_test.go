@@ -184,6 +184,7 @@ func TestSaveDefault(t *testing.T) {
 		"# ctx-size:",
 		"# gpu-layers:",
 		"# temp:",
+		"# auto_update:",
 	}
 
 	for _, s := range expectedStrings {
@@ -191,6 +192,55 @@ func TestSaveDefault(t *testing.T) {
 			t.Errorf("Expected config to contain '%s'", s)
 		}
 	}
+}
+
+func TestAutoUpdateEnabled(t *testing.T) {
+	t.Run("defaults to true when unset", func(t *testing.T) {
+		llama := &LlamaCpp{}
+		if !llama.AutoUpdateEnabled() {
+			t.Error("Expected auto-update to be enabled by default")
+		}
+	})
+
+	t.Run("respects explicit false", func(t *testing.T) {
+		disabled := false
+		llama := &LlamaCpp{AutoUpdate: &disabled}
+		if llama.AutoUpdateEnabled() {
+			t.Error("Expected auto-update to be disabled when set to false")
+		}
+	})
+
+	t.Run("respects explicit true", func(t *testing.T) {
+		enabled := true
+		llama := &LlamaCpp{AutoUpdate: &enabled}
+		if !llama.AutoUpdateEnabled() {
+			t.Error("Expected auto-update to be enabled when set to true")
+		}
+	})
+
+	t.Run("parses from YAML", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		oldHome := os.Getenv("HOME")
+		defer os.Setenv("HOME", oldHome)
+		os.Setenv("HOME", tmpDir)
+
+		configDir := filepath.Join(tmpDir, ".lleme")
+		if err := os.MkdirAll(configDir, 0755); err != nil {
+			t.Fatalf("Failed to create test config dir: %v", err)
+		}
+		configPath := filepath.Join(configDir, "config.yaml")
+		if err := os.WriteFile(configPath, []byte("llamacpp:\n  auto_update: false\n"), 0644); err != nil {
+			t.Fatalf("Failed to write test config: %v", err)
+		}
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Expected no error, got %v", err)
+		}
+		if cfg.LlamaCpp.AutoUpdateEnabled() {
+			t.Error("Expected auto-update to be disabled after parsing YAML")
+		}
+	})
 }
 
 func TestGetOption(t *testing.T) {
