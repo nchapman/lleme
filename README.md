@@ -4,8 +4,6 @@ Run local LLMs from Hugging Face with a single command.
 Drop-in replacement for OpenAI **and** Anthropic APIs — works with Claude Code and any other tool that speaks either protocol.
 
 [![Release](https://img.shields.io/github/v/release/nchapman/lleme?color=blue)](https://github.com/nchapman/lleme/releases)
-[![License](https://img.shields.io/github/license/nchapman/lleme)](./LICENSE)
-[![Go Reference](https://pkg.go.dev/badge/github.com/nchapman/lleme.svg)](https://pkg.go.dev/github.com/nchapman/lleme)
 
 <video src="https://tilde.quest/~nchapman/media/videos/lleme-demo.mp4"
        autoplay loop muted playsinline
