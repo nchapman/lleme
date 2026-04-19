@@ -16,31 +16,48 @@ Linting uses golangci-lint with `errcheck` and `unused` disabled.
 
 ## Architecture Overview
 
-**lleme** is a Go CLI for running local LLMs via llama.cpp with Hugging Face model management. Built on Charmbracelet (bubbletea, lipgloss, glamour) for TUI and Cobra for CLI.
+**lleme** is a Go CLI for running local LLMs via llama.cpp (GGUF) and SwiftLM (MLX, Apple Silicon only), with Hugging Face model management. Built on Charmbracelet (bubbletea, lipgloss, glamour) for TUI and Cobra for CLI.
 
 ### Multi-Model Proxy (Core Architecture)
 
-The central design is a reverse-proxy that manages multiple llama.cpp backend instances:
+The central design is a reverse-proxy that manages multiple backend server instances:
 
 ```
-CLI/API → Proxy (port 11313) → Routes by model name → llama-server instances (:11314+)
+CLI/API → Proxy (port 11313) → Routes by model name → backend servers (:49152+)
+                                                      ├─ llama-server (GGUF)
+                                                      └─ SwiftLM (MLX, darwin/arm64)
 ```
 
 Key packages in `internal/proxy/`:
-- `server.go` - HTTP routing, reverse-proxy to backends
-- `manager.go` - Model lifecycle (start/stop llama-server, LRU eviction, max 3 models)
+- `server.go` - HTTP routing, reverse-proxy to backends, `/v1/chat/completions` pass-through
+- `anthropic.go` - In-proxy translation of `/v1/messages` ⇄ `/v1/chat/completions` so backends only need an OpenAI surface
+- `manager.go` - Model lifecycle (start/stop backend, LRU eviction, max 3 models)
+- `backend.go` - `Runtime` interface: `Kind`, `HFAppName`, `BinaryPath`, `WorkingDir`, `BuildArgs`, `HealthURL`, `IsStartupError`
+- `backend_llama.go`, `backend_swiftlm.go` - Concrete runtimes
+- `backend_select.go` - Reads `metadata.yaml` backend kind → picks the runtime
+- `registry.go` - `AllRuntimes` / `HFAppNames` (single registration point for a new backend)
 - `idle.go` - Background monitor for auto-unloading idle models
 - `ports.go` - Dynamic port allocation for backends
+
+### Backends
+
+Each backend is a `Runtime` that owns its binary, args, health probe, and error log scan. Adding a new backend means (1) implement `Runtime`, (2) add its constructor to `AllRuntimes()` in `registry.go`, (3) add a `case` in `selectRuntime` for its `metadata.yaml` kind, (4) optionally a config section under a new YAML key to mirror `llamacpp:` / `swiftlm:`. Nothing in `cmd/` or the discovery surface hardcodes a backend list — `cmd/search.go` joins every registered `HFAppName` for the `?apps=` filter.
+
+**Security-sensitive install code is shared**: `internal/binaryrelease/` owns URL host/scheme allow-lists, download size caps, atomic symlink swap (`swiftlm-current` / `llama-current`), and a validating tar extractor (no path traversal, no escaping symlinks). Each backend installer (`internal/llama/binary.go`, `internal/swiftlm/binary.go`) wraps these primitives with its own repo URL, platform matrix, and `version.json` sibling file.
+
+MLX is **macOS/arm64 only**; `swiftlm.IsSupported()` gates both install and pull. On unsupported platforms, pulling an MLX repo exits with a clear message.
 
 ### Package Structure
 
 - `cmd/` - Cobra CLI commands (run, pull, list, serve, status, etc.)
+- `internal/binaryrelease/` - Shared GitHub-release installer primitives (download, URL allow-list, tar extraction, symlink swap)
 - `internal/config/` - Config loading/saving, personas (user-saved model settings)
-- `internal/hf/` - Hugging Face API client, model downloads, quantization detection
+- `internal/hf/` - Hugging Face API client, model downloads, GGUF + MLX detection, `inventory.go` metadata-driven listing
 - `internal/llama/` - llama.cpp binary management
+- `internal/swiftlm/` - SwiftLM binary management (MLX runtime)
 - `internal/options/` - Settings resolver with layered precedence
 - `internal/presets/` - Built-in curated sampling defaults per model family (embedded YAML)
-- `internal/proxy/` - Multi-model proxy server
+- `internal/proxy/` - Multi-model proxy server + runtime registry + Anthropic translation
 - `internal/server/` - Backend API client (OpenAI-compatible)
 - `internal/tui/` - Bubbletea TUI (chat model, components, styles)
 - `internal/ui/` - CLI utilities (spinner, progress, table, logger)
@@ -48,10 +65,13 @@ Key packages in `internal/proxy/`:
 ### Data Storage
 
 All data lives in `~/.lleme/`:
-- `config.yaml` - User configuration
-- `models/` - Downloaded GGUF files (`user/repo/quant.gguf`)
-- `bin/` - llama.cpp binaries
-- `logs/` - Rotating log files
+- `config.yaml` - User configuration (`llamacpp:` and `swiftlm:` sections)
+- `models/user/repo/metadata.yaml` - Per-repo record of each quant's backend kind; `lleme list`/`remove` walk these, not `*.gguf` globs
+- `models/user/repo/<quant>.gguf` - Single-file GGUF layout
+- `models/user/repo/<quant>/` - Directory layout (GGUF split shards OR full MLX tree with safetensors + tokenizer files)
+- `bin/llama-current/` - Active llama.cpp symlink; `bin/version.json` tracks installed tag
+- `bin/swiftlm-current/` - Active SwiftLM symlink; `bin/swiftlm-version.json` tracks installed tag
+- `logs/` - Rotating log files (one per loaded model)
 
 ### Settings Resolver & Presets
 
@@ -70,6 +90,8 @@ The resolver uses **key-existence semantics**: a key with value `0` is distinct 
 **Presets** live in `internal/presets/data/*.yaml`, embedded via `go:embed`. Each file defines sampling defaults for a model family and a list of `path.Match` globs against `user/repo`. Matching is case-insensitive and first-match-wins in **alphabetical order** of filename, so more specific files must sort before more general ones (e.g. `qwen3-coder.yaml` before `qwen3.yaml`).
 
 When adding or editing a preset, read `internal/presets/data/README.md` first — it documents pattern conventions, ordering rules, what belongs under `options` (sampling params only, no runtime/hardware knobs), and when to split a family into multiple files. The `presets_test.go` table should include a realistic HF repo name per new preset, plus an ordering test if the preset could be masked by a more general one.
+
+**Backend-specific preset/persona options**: both presets and personas support optional `llamacpp:` / `swiftlm:` sub-blocks that layer on top of the shared `options:` map for the matching runtime only. Merge order for a given backend kind: preset-shared → preset-backend → persona-shared → persona-backend (later wins). The client resolves kind via `hf.BackendKindForModelName` before calling `Persona.GetServerOptions(kind)` and `presets.MergeServerOptions(preset, personaOpts, kind)`.
 
 ## Code Patterns
 

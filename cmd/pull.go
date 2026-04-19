@@ -147,6 +147,16 @@ func pullMLX(client *hf.Client, user, repo, quant string) {
 		return
 	}
 
+	// Install SwiftLM now if it's missing — pulling an MLX model with no
+	// runtime to serve it would be a dead end.
+	if !swiftlm.IsInstalled() {
+		fmt.Println("Installing SwiftLM...")
+		if _, err := swiftlm.InstallLatest(func(msg string) { fmt.Println(msg) }); err != nil {
+			ui.Fatal("Failed to install SwiftLM: %v", err)
+		}
+		fmt.Println()
+	}
+
 	if quant == "" {
 		quant = hf.MLXQuantFromRepo(repo)
 	}
