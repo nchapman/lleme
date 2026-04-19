@@ -229,14 +229,199 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	s.proxyToBackend(w, r, "/v1/embeddings")
 }
 
-// handleAnthropicMessages proxies Anthropic Messages API requests
+// handleAnthropicMessages translates an Anthropic /v1/messages request into
+// an OpenAI chat completion, forwards it to the selected backend, and
+// translates the response back. Translation happens in the proxy so backends
+// (llama-server, SwiftLM) only need to speak OpenAI.
 func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
-	s.proxyToBackendAnthropic(w, r, "/v1/messages")
+	requestID := generateRequestID()
+
+	body, ok := s.readAnthropicBody(w, r, requestID)
+	if !ok {
+		return
+	}
+
+	modelName, ok := s.extractAnthropicModel(w, requestID, body)
+	if !ok {
+		return
+	}
+
+	openAIBody, stream, err := translateAnthropicRequest(body)
+	if err != nil {
+		s.writeAnthropicTranslationError(w, requestID, err)
+		return
+	}
+
+	backend, err := s.manager.GetOrLoadBackend(modelName, nil)
+	if err != nil {
+		s.handleAnthropicModelError(w, requestID, err)
+		return
+	}
+	defer backend.ReleaseRequest()
+
+	resp, err := s.forwardToBackendChat(r.Context(), backend, openAIBody, stream)
+	if err != nil {
+		s.writeAnthropicError(w, requestID, http.StatusBadGateway, AnthropicAPIError, "Backend request failed: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		// Cap the error body we buffer & echo back — a misbehaving backend
+		// shouldn't cause the proxy to hold a multi-MB error string in memory
+		// or leak arbitrarily large internals to the caller.
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
+		msg := strings.TrimSpace(string(errBody))
+		if msg == "" {
+			msg = fmt.Sprintf("backend returned %d", resp.StatusCode)
+		}
+		s.writeAnthropicError(w, requestID, resp.StatusCode, AnthropicAPIError, msg)
+		return
+	}
+
+	messageID := "msg_" + strings.TrimPrefix(requestID, "req_")
+	if stream {
+		s.writeAnthropicStream(w, resp.Body, requestID, messageID, modelName)
+		return
+	}
+	s.writeAnthropicNonStream(w, resp.Body, requestID, messageID)
 }
 
-// handleAnthropicCountTokens proxies Anthropic token counting requests
+// extractAnthropicModel pulls the model field out of an Anthropic request
+// body and writes an error response if missing or malformed.
+func (s *Server) extractAnthropicModel(w http.ResponseWriter, requestID string, body []byte) (string, bool) {
+	var modelRef struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &modelRef); err != nil {
+		s.writeAnthropicError(w, requestID, http.StatusBadRequest, AnthropicInvalidRequest, "Failed to parse request body as JSON")
+		return "", false
+	}
+	if modelRef.Model == "" {
+		s.writeAnthropicError(w, requestID, http.StatusBadRequest, AnthropicInvalidRequest, "model: Field required")
+		return "", false
+	}
+	return modelRef.Model, true
+}
+
+// forwardToBackendChat POSTs a translated OpenAI request to the backend's
+// /v1/chat/completions endpoint and returns the raw response.
+func (s *Server) forwardToBackendChat(ctx context.Context, backend *Backend, openAIBody []byte, stream bool) (*http.Response, error) {
+	backendURL := fmt.Sprintf("http://%s:%d/v1/chat/completions", s.config.Host, backend.Port)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, backendURL, bytes.NewReader(openAIBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if stream {
+		req.Header.Set("Accept", "text/event-stream")
+	}
+	return backendChatClient.Do(req)
+}
+
+// writeAnthropicStream sets SSE headers and pumps the translated stream.
+// Errors after the header has been written can't be surfaced to the client
+// as HTTP status; log them for debugging.
+func (s *Server) writeAnthropicStream(w http.ResponseWriter, body io.Reader, requestID, messageID, model string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("request-id", requestID)
+	w.WriteHeader(http.StatusOK)
+
+	if err := translateAnthropicStream(w, body, messageID, model); err != nil {
+		logs.Debug("anthropic stream translation ended with error", "error", err)
+	}
+}
+
+// writeAnthropicNonStream reads the full backend response, translates to
+// Anthropic format, and writes it.
+func (s *Server) writeAnthropicNonStream(w http.ResponseWriter, body io.Reader, requestID, messageID string) {
+	respBody, err := io.ReadAll(body)
+	if err != nil {
+		s.writeAnthropicError(w, requestID, http.StatusBadGateway, AnthropicAPIError, "Failed to read backend response")
+		return
+	}
+	translated, err := translateOpenAIResponse(respBody, messageID)
+	if err != nil {
+		s.writeAnthropicError(w, requestID, http.StatusInternalServerError, AnthropicAPIError, "Translation error: "+err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("request-id", requestID)
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(translated); err != nil {
+		logs.Debug("failed to write anthropic response", "error", err)
+	}
+}
+
+// handleAnthropicCountTokens returns an approximate input-token count for an
+// Anthropic /v1/messages/count_tokens request. Backends don't expose an
+// OpenAI-equivalent tokenize endpoint uniformly, so we approximate on the
+// proxy side. The estimate leans toward overcounting so callers plan
+// conservatively; see countAnthropicTokens for the ratio.
 func (s *Server) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
-	s.proxyToBackendAnthropic(w, r, "/v1/messages/count_tokens")
+	requestID := generateRequestID()
+
+	body, ok := s.readAnthropicBody(w, r, requestID)
+	if !ok {
+		return
+	}
+
+	count, err := countAnthropicTokens(body)
+	if err != nil {
+		s.writeAnthropicTranslationError(w, requestID, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("request-id", requestID)
+	w.WriteHeader(http.StatusOK)
+	writeJSON(w, map[string]int{"input_tokens": count})
+}
+
+// backendChatClient forwards translated requests to a local backend. No
+// timeout: streaming completions can run for minutes, and request-context
+// cancelation already covers the disconnect case. Named to avoid reading
+// like an Anthropic cloud client — the target is always a local backend.
+var backendChatClient = &http.Client{}
+
+// readAnthropicBody reads and size-caps the request body, writing an Anthropic
+// error response on failure. Returns (body, true) on success, or (nil, false)
+// after writing an error response.
+func (s *Server) readAnthropicBody(w http.ResponseWriter, r *http.Request, requestID string) ([]byte, bool) {
+	if r.Method != http.MethodPost {
+		s.writeAnthropicError(w, requestID, http.StatusMethodNotAllowed, AnthropicInvalidRequest, "Only POST is allowed")
+		return nil, false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			s.writeAnthropicError(w, requestID, http.StatusRequestEntityTooLarge, AnthropicInvalidRequest,
+				fmt.Sprintf("Request body exceeds %d bytes", maxRequestBodyBytes))
+			return nil, false
+		}
+		s.writeAnthropicError(w, requestID, http.StatusBadRequest, AnthropicInvalidRequest, "Failed to read request body")
+		return nil, false
+	}
+	r.Body.Close()
+	// Strip Anthropic client auth headers before any downstream forwarding.
+	r.Header.Del("x-api-key")
+	return body, true
+}
+
+// writeAnthropicTranslationError maps a translation error to an Anthropic
+// HTTP response. translateError carries the intended status and error type;
+// other errors surface as 500 api_error.
+func (s *Server) writeAnthropicTranslationError(w http.ResponseWriter, requestID string, err error) {
+	var te *translateError
+	if errors.As(err, &te) {
+		s.writeAnthropicError(w, requestID, te.status, te.errType, te.msg)
+		return
+	}
+	s.writeAnthropicError(w, requestID, http.StatusInternalServerError, AnthropicAPIError, err.Error())
 }
 
 // proxyToBackend handles the common logic of extracting model and proxying
@@ -302,86 +487,6 @@ func (s *Server) proxyToBackend(w http.ResponseWriter, r *http.Request, path str
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
 	r.URL.Path = path
-
-	proxy.ServeHTTP(w, r)
-}
-
-// proxyToBackendAnthropic handles Anthropic API requests with proper error format
-func (s *Server) proxyToBackendAnthropic(w http.ResponseWriter, r *http.Request, path string) {
-	requestID := generateRequestID()
-
-	if r.Method != http.MethodPost {
-		s.writeAnthropicError(w, requestID, http.StatusMethodNotAllowed, AnthropicInvalidRequest, "Only POST is allowed")
-		return
-	}
-
-	// Cap inbound body to prevent unbounded memory use.
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			s.writeAnthropicError(w, requestID, http.StatusRequestEntityTooLarge, AnthropicInvalidRequest,
-				fmt.Sprintf("Request body exceeds %d bytes", maxRequestBodyBytes))
-			return
-		}
-		s.writeAnthropicError(w, requestID, http.StatusBadRequest, AnthropicInvalidRequest, "Failed to read request body")
-		return
-	}
-	r.Body.Close()
-
-	var req struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		s.writeAnthropicError(w, requestID, http.StatusBadRequest, AnthropicInvalidRequest, "Failed to parse request body as JSON")
-		return
-	}
-
-	if req.Model == "" {
-		s.writeAnthropicError(w, requestID, http.StatusBadRequest, AnthropicInvalidRequest, "model: Field required")
-		return
-	}
-
-	// Get or load the backend.
-	// GetOrLoadBackend reserves the backend via AcquireRequest; we release on return.
-	backend, err := s.manager.GetOrLoadBackend(req.Model, nil)
-	if err != nil {
-		s.handleAnthropicModelError(w, requestID, err)
-		return
-	}
-	defer backend.ReleaseRequest()
-
-	// Proxy the request
-	backendURL := fmt.Sprintf("http://%s:%d", s.config.Host, backend.Port)
-	target, err := url.Parse(backendURL)
-	if err != nil {
-		s.writeAnthropicError(w, requestID, http.StatusInternalServerError, AnthropicAPIError, "Internal server error")
-		return
-	}
-
-	proxy := httputil.NewSingleHostReverseProxy(target)
-
-	// Handle streaming responses properly
-	proxy.FlushInterval = -1 // Flush immediately for SSE
-
-	proxy.ModifyResponse = func(resp *http.Response) error {
-		resp.Header.Set("request-id", requestID)
-		return stripCORSHeaders(resp)
-	}
-
-	// Handle backend errors
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		s.writeAnthropicError(w, requestID, http.StatusBadGateway, AnthropicAPIError, "Backend server error: "+err.Error())
-	}
-
-	// Restore the body for the proxied request
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	r.ContentLength = int64(len(body))
-	r.URL.Path = path
-
-	// Strip Anthropic auth headers before forwarding (local server doesn't need them)
-	r.Header.Del("x-api-key")
 
 	proxy.ServeHTTP(w, r)
 }
