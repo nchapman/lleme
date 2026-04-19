@@ -119,8 +119,9 @@ func isProcessRunning(pid int) bool {
 	return process.Signal(syscall.Signal(0)) == nil
 }
 
-// CleanupOrphanedBackends kills any orphaned llama-server processes from a previous
-// proxy instance that crashed. Returns the number of processes killed.
+// CleanupOrphanedBackends kills any orphaned backend processes (llama-server
+// or SwiftLM) from a previous proxy instance that crashed. Returns the
+// number of processes killed.
 func CleanupOrphanedBackends() int {
 	state, err := LoadProxyState()
 	if err != nil || state == nil {
@@ -142,8 +143,10 @@ func CleanupOrphanedBackends() int {
 			continue
 		}
 
-		// Verify this is actually a llama-server process
-		if !isLlamaServerProcess(backend.PID) {
+		// Verify this is a known backend process before sending signals.
+		// We don't persist the backend kind in state, so the PID alone is
+		// matched against both llama-server and SwiftLM command names.
+		if !isKnownBackendProcess(backend.PID) {
 			continue
 		}
 
@@ -160,20 +163,32 @@ func CleanupOrphanedBackends() int {
 	return killed
 }
 
-// isLlamaServerProcess checks if the given PID is a llama-server process.
-// Uses ps command which works on both Linux and macOS.
-func isLlamaServerProcess(pid int) bool {
+// isKnownBackendProcess reports whether the PID's `ps -o comm=` output
+// matches one of the backend binaries lleme launches. Works on Linux and
+// macOS; on both, comm is the basename of the executable.
+func isKnownBackendProcess(pid int) bool {
 	cmd := exec.Command("ps", "-p", fmt.Sprintf("%d", pid), "-o", "comm=")
 	output, err := cmd.Output()
 	if err != nil {
 		return false
 	}
-	return containsLlamaServer(string(output))
+	return cmdlineMatchesBackend(string(output))
 }
 
-// containsLlamaServer checks if a command line contains llama-server
-func containsLlamaServer(cmdline string) bool {
-	return strings.Contains(cmdline, "llama-server") || strings.Contains(cmdline, "llama_server")
+// cmdlineMatchesBackend checks whether the given process command name
+// belongs to one of our backends.
+//
+// llama-server uses substring match because the process may appear under
+// shell wrappers on some installations (retaining the pre-SwiftLM posture).
+// SwiftLM uses exact-basename match after trimming whitespace — its name is
+// short enough that substring matching risks false positives against
+// user-named binaries (e.g. `MySwiftLMWrapper`) and the SwiftLM binary
+// always executes directly, so exact match is tight and sufficient.
+func cmdlineMatchesBackend(cmdline string) bool {
+	if strings.Contains(cmdline, "llama-server") || strings.Contains(cmdline, "llama_server") {
+		return true
+	}
+	return strings.TrimSpace(cmdline) == "SwiftLM"
 }
 
 // killProcess sends SIGTERM, waits briefly, then SIGKILL if needed

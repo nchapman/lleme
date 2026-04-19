@@ -208,7 +208,7 @@ func TestIsProcessRunning(t *testing.T) {
 	}
 }
 
-func TestContainsLlamaServer(t *testing.T) {
+func TestCmdlineMatchesBackend(t *testing.T) {
 	tests := []struct {
 		name     string
 		cmdline  string
@@ -223,6 +223,21 @@ func TestContainsLlamaServer(t *testing.T) {
 			name:     "llama_server with underscore",
 			cmdline:  "/opt/llama_server\x00--port\x0049152",
 			expected: true,
+		},
+		{
+			name:     "SwiftLM via ps -o comm= (basename + newline)",
+			cmdline:  "SwiftLM\n",
+			expected: true,
+		},
+		{
+			name:     "SwiftLM no trailing whitespace",
+			cmdline:  "SwiftLM",
+			expected: true,
+		},
+		{
+			name:     "SwiftLM substring must not false-positive",
+			cmdline:  "MySwiftLMWrapper\n",
+			expected: false,
 		},
 		{
 			name:     "different process",
@@ -243,9 +258,9 @@ func TestContainsLlamaServer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := containsLlamaServer(tt.cmdline)
+			result := cmdlineMatchesBackend(tt.cmdline)
 			if result != tt.expected {
-				t.Errorf("containsLlamaServer(%q) = %v, want %v", tt.cmdline, result, tt.expected)
+				t.Errorf("cmdlineMatchesBackend(%q) = %v, want %v", tt.cmdline, result, tt.expected)
 			}
 		})
 	}
