@@ -279,14 +279,14 @@ func TestGetOption(t *testing.T) {
 func TestGetServerOptions(t *testing.T) {
 	t.Run("nil persona returns nil", func(t *testing.T) {
 		var p *Persona
-		if got := p.GetServerOptions(); got != nil {
+		if got := p.GetServerOptions(""); got != nil {
 			t.Errorf("Expected nil, got %v", got)
 		}
 	})
 
 	t.Run("empty options returns nil", func(t *testing.T) {
 		p := &Persona{}
-		if got := p.GetServerOptions(); got != nil {
+		if got := p.GetServerOptions(""); got != nil {
 			t.Errorf("Expected nil, got %v", got)
 		}
 	})
@@ -303,7 +303,7 @@ func TestGetServerOptions(t *testing.T) {
 				"dry-multiplier":       0.8,
 			},
 		}
-		got := p.GetServerOptions()
+		got := p.GetServerOptions("")
 		if got == nil {
 			t.Fatal("Expected non-nil options")
 		}
@@ -331,10 +331,37 @@ func TestGetServerOptions(t *testing.T) {
 		}
 	})
 
+	t.Run("backend-specific options layer on shared", func(t *testing.T) {
+		p := &Persona{
+			Options:  map[string]any{"temp": 0.7, "top-k": 40},
+			LlamaCpp: PersonaBackendSection{Options: map[string]any{"mirostat": 2, "temp": 0.5}},
+			SwiftLM:  PersonaBackendSection{Options: map[string]any{"turbo-kv": true}},
+		}
+
+		gguf := p.GetServerOptions("gguf")
+		if gguf["temp"] != 0.5 {
+			t.Errorf("gguf temp = %v, want 0.5 (llamacpp overrides shared)", gguf["temp"])
+		}
+		if gguf["mirostat"] != 2 {
+			t.Errorf("gguf mirostat = %v, want 2", gguf["mirostat"])
+		}
+		if _, ok := gguf["turbo-kv"]; ok {
+			t.Error("gguf leaked swiftlm-only option")
+		}
+
+		mlx := p.GetServerOptions("mlx")
+		if mlx["turbo-kv"] != true {
+			t.Error("mlx missing turbo-kv")
+		}
+		if _, ok := mlx["mirostat"]; ok {
+			t.Error("mlx leaked llamacpp-only option")
+		}
+	})
+
 	t.Run("returns a copy, not the original map", func(t *testing.T) {
 		opts := map[string]any{"temp": 0.8}
 		p := &Persona{Options: opts}
-		got := p.GetServerOptions()
+		got := p.GetServerOptions("")
 		if got == nil {
 			t.Fatal("Expected non-nil options")
 		}

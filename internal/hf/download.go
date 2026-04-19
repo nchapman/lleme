@@ -315,6 +315,27 @@ const (
 	BackendMLX  = "mlx"
 )
 
+// BackendKindForModelName parses a "user/repo:quant" reference and resolves
+// its backend kind via metadata.yaml. Falls back to BackendGGUF for any
+// parse or read error — callers treat the result as a hint for layering
+// backend-specific options, not an authoritative runtime selection.
+func BackendKindForModelName(fullName string) string {
+	colon := strings.LastIndex(fullName, ":")
+	if colon < 0 {
+		return BackendGGUF
+	}
+	repoPart, quant := fullName[:colon], fullName[colon+1:]
+	slash := strings.Index(repoPart, "/")
+	if slash < 0 {
+		return BackendGGUF
+	}
+	kind, err := GetBackendKind(repoPart[:slash], repoPart[slash+1:], quant)
+	if err != nil {
+		return BackendGGUF
+	}
+	return kind
+}
+
 // GetBackendKind returns the recorded backend kind for a quant. A missing
 // metadata file or an empty `backend:` field resolves to "gguf" (the only
 // format lleme supported before MLX). I/O and parse errors are propagated

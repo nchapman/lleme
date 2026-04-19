@@ -11,26 +11,62 @@ import (
 	"github.com/nchapman/lleme/internal/logs"
 )
 
+// PresetBackendSection holds runtime-specific option overrides. When set,
+// these layer on top of Preset.Options for the matching backend only.
+type PresetBackendSection struct {
+	Options map[string]any `yaml:"options,omitempty"`
+}
+
 // Preset holds curated inference settings for a model family.
+//
+// Options layering (per backend) is:
+//
+//	shared Options → backend-specific Options (later wins)
+//
+// so the common Qwen3 sampling defaults can live under the top-level
+// `options:` and backend-specific knobs (mirostat for llama.cpp, turbo-kv
+// for SwiftLM) sit under their respective sub-blocks without affecting the
+// other runtime.
 type Preset struct {
-	Name    string         `yaml:"name"`
-	Source  string         `yaml:"source"`
-	Match   []string       `yaml:"match"`
-	Options map[string]any `yaml:"options"`
+	Name     string               `yaml:"name"`
+	Source   string               `yaml:"source"`
+	Match    []string             `yaml:"match"`
+	Options  map[string]any       `yaml:"options"`
+	LlamaCpp PresetBackendSection `yaml:"llamacpp,omitempty"`
+	SwiftLM  PresetBackendSection `yaml:"swiftlm,omitempty"`
 
 	filename string // set by Load, used for deterministic sort
 }
 
-// GetOptions returns a shallow copy of the preset's options map.
-func (p *Preset) GetOptions() map[string]any {
-	if p == nil || len(p.Options) == 0 {
+// GetOptions returns a shallow copy of the preset's options, layered for
+// the given backend kind (hf.BackendGGUF / hf.BackendMLX). An empty kind
+// applies only the shared Options map.
+func (p *Preset) GetOptions(kind string) map[string]any {
+	if p == nil {
 		return nil
 	}
-	out := make(map[string]any, len(p.Options))
+	specific := p.backendOptions(kind)
+	if len(p.Options) == 0 && len(specific) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(p.Options)+len(specific))
 	for k, v := range p.Options {
 		out[k] = v
 	}
+	for k, v := range specific {
+		out[k] = v
+	}
 	return out
+}
+
+func (p *Preset) backendOptions(kind string) map[string]any {
+	switch kind {
+	case "gguf":
+		return p.LlamaCpp.Options
+	case "mlx":
+		return p.SwiftLM.Options
+	}
+	return nil
 }
 
 // Load parses all embedded *.yaml preset files, sorted alphabetically by filename.
@@ -70,14 +106,17 @@ func Load() ([]*Preset, error) {
 	return presets, nil
 }
 
-// MergeServerOptions builds a server options map merging preset and persona,
-// with persona taking priority. Returns nil if both have no options.
-func MergeServerOptions(preset *Preset, personaOpts map[string]any) map[string]any {
-	presetOpts := preset.GetOptions()
+// MergeServerOptions builds a server options map layered for the given
+// backend kind: preset shared → preset backend-specific → persona shared
+// → persona backend-specific. Later wins. Returns nil if every layer is
+// empty. kind should be hf.BackendGGUF or hf.BackendMLX; any other value
+// falls back to the shared layers only.
+func MergeServerOptions(preset *Preset, personaOpts map[string]any, kind string) map[string]any {
+	presetOpts := preset.GetOptions(kind)
 	if presetOpts == nil && personaOpts == nil {
 		return nil
 	}
-	merged := make(map[string]any)
+	merged := make(map[string]any, len(presetOpts)+len(personaOpts))
 	for k, v := range presetOpts {
 		merged[k] = v
 	}

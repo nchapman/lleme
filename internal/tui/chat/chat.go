@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/nchapman/lleme/internal/config"
+	"github.com/nchapman/lleme/internal/hf"
 	"github.com/nchapman/lleme/internal/options"
 	"github.com/nchapman/lleme/internal/presets"
 	"github.com/nchapman/lleme/internal/server"
@@ -200,11 +201,12 @@ func (m *Model) preloadModel() tea.Cmd {
 	api := m.api
 	model := m.model
 	options := m.options
+	kind := hf.BackendKindForModelName(m.model)
 	var personaOpts map[string]any
 	if m.persona != nil {
-		personaOpts = m.persona.GetServerOptions()
+		personaOpts = m.persona.GetServerOptions(kind)
 	}
-	mergedOpts := presets.MergeServerOptions(m.preset, personaOpts)
+	mergedOpts := presets.MergeServerOptions(m.preset, personaOpts, kind)
 
 	return func() tea.Msg {
 		var opts *server.RunOptions

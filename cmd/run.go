@@ -168,12 +168,17 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 
 		// One-shot mode for CLI prompts or piped input
 		if promptArg != "" {
+			// Resolve the backend kind so preset/persona backend-specific
+			// sections land in the right runtime. Errors here only mean
+			// we'll use shared options, which is the safe default.
+			backendKind, _ := hf.GetBackendKind(resolvedModel.User, resolvedModel.Repo, resolvedModel.Quant)
+
 			// Preload model with options (sync - user is blocked waiting for output anyway)
 			var personaOpts map[string]any
 			if activePersona != nil {
-				personaOpts = activePersona.GetServerOptions()
+				personaOpts = activePersona.GetServerOptions(backendKind)
 			}
-			mergedOpts := presets.MergeServerOptions(activePreset, personaOpts)
+			mergedOpts := presets.MergeServerOptions(activePreset, personaOpts, backendKind)
 			if ctxSizeSet || gpuLayersSet || threadsSet || mergedOpts != nil {
 				opts := &server.RunOptions{
 					Options: mergedOpts,
