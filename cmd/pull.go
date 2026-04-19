@@ -7,6 +7,7 @@ import (
 
 	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/hf"
+	"github.com/nchapman/lleme/internal/swiftlm"
 	"github.com/nchapman/lleme/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -138,6 +139,14 @@ Examples:
 // not supplied, the entire repo is downloaded into a per-quant directory,
 // and metadata.yaml is updated with backend=mlx.
 func pullMLX(client *hf.Client, user, repo, quant string) {
+	if !swiftlm.IsSupported() {
+		ui.PrintError("MLX models require macOS on Apple Silicon")
+		fmt.Fprintln(os.Stderr, "\nThis repository contains MLX weights, which only run under SwiftLM on darwin/arm64.")
+		fmt.Fprintln(os.Stderr, "On other platforms, pull a GGUF repo (e.g. a bartowski/* or unsloth/* release).")
+		ui.ExitFunc(1)
+		return
+	}
+
 	if quant == "" {
 		quant = hf.MLXQuantFromRepo(repo)
 	}
