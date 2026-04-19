@@ -158,6 +158,14 @@ func (m *ModelManager) GetOrLoadBackend(modelQuery string, options map[string]an
 		m.mu.Lock()
 	}
 
+	// Resolve which runtime serves this model before we commit to any
+	// resources (port, LRU entry) so a bad metadata entry fails cleanly.
+	runtime, err := m.selectRuntime(result.Model.User, result.Model.Repo, result.Model.Quant)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, err
+	}
+
 	// Allocate port
 	port, err := m.portAllocator.Allocate()
 	if err != nil {
@@ -169,7 +177,7 @@ func (m *ModelManager) GetOrLoadBackend(modelQuery string, options map[string]an
 	backend = &Backend{
 		ModelName:    modelName,
 		ModelPath:    modelPath,
-		Runtime:      m.selectRuntime(modelPath, modelName),
+		Runtime:      runtime,
 		Port:         port,
 		Status:       BackendStarting,
 		StartedAt:    time.Now(),

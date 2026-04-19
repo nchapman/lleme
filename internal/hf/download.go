@@ -247,6 +247,10 @@ type ModelMetadata struct {
 type QuantMetadata struct {
 	LastUsed     time.Time `yaml:"last_used,omitempty"`
 	DownloadedAt time.Time `yaml:"downloaded_at,omitempty"`
+	// Backend identifies the runtime that serves this quant: "gguf" or "mlx".
+	// Empty in legacy metadata files — treat as "gguf" (the only kind lleme
+	// could pull before MLX support landed).
+	Backend string `yaml:"backend,omitempty"`
 }
 
 // GetMetadataPath returns the path to the metadata.yaml file for a model repo.
@@ -283,6 +287,48 @@ func SaveMetadata(user, repo string, meta *ModelMetadata) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0644)
+}
+
+// SetBackendKind records the runtime kind ("gguf" or "mlx") for a quant in
+// metadata.yaml. Called at pull time so the proxy can pick the right backend
+// without re-detecting the model format.
+func SetBackendKind(user, repo, quant, kind string) error {
+	meta, err := LoadMetadata(user, repo)
+	if err != nil {
+		return err
+	}
+
+	q := meta.Quants[quant]
+	q.Backend = kind
+	if q.DownloadedAt.IsZero() {
+		q.DownloadedAt = time.Now()
+	}
+	meta.Quants[quant] = q
+
+	return SaveMetadata(user, repo, meta)
+}
+
+// Known backend kinds as persisted in metadata.yaml. These identify the
+// on-disk model format; the proxy maps them to a concrete Runtime.
+const (
+	BackendGGUF = "gguf"
+	BackendMLX  = "mlx"
+)
+
+// GetBackendKind returns the recorded backend kind for a quant. A missing
+// metadata file or an empty `backend:` field resolves to "gguf" (the only
+// format lleme supported before MLX). I/O and parse errors are propagated
+// so callers can surface them instead of silently falling back.
+func GetBackendKind(user, repo, quant string) (string, error) {
+	meta, err := LoadMetadata(user, repo)
+	if err != nil {
+		return "", err
+	}
+	q, ok := meta.Quants[quant]
+	if !ok || q.Backend == "" {
+		return BackendGGUF, nil
+	}
+	return q.Backend, nil
 }
 
 // TouchLastUsed updates the last used timestamp for a model.

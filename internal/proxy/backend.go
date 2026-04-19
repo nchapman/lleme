@@ -37,10 +37,3 @@ const (
 	BackendKindLlama BackendKind = "llama"
 	BackendKindMLX   BackendKind = "mlx"
 )
-
-// selectRuntime chooses the Runtime for a given model. Today this is always
-// llama-server; once metadata.yaml records a per-model backend type, this
-// will read it and branch on the recorded kind.
-func (m *ModelManager) selectRuntime(modelPath, modelName string) Runtime {
-	return NewLlamaRuntime(m.appConfig)
-}

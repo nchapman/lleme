@@ -126,6 +126,12 @@ func PullModel(client *Client, user, repo string, quant Quantization, opts *Pull
 		return nil, err
 	}
 
+	// Record the backend runtime for this quant so the proxy can dispatch
+	// to the right server without re-detecting the model format later.
+	if err := SetBackendKind(user, repo, quant.Name, BackendGGUF); err != nil {
+		return nil, fmt.Errorf("failed to record backend kind: %w", err)
+	}
+
 	return result, nil
 }
 

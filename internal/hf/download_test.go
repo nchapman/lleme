@@ -244,6 +244,72 @@ func TestFindFirstSplitFileEmptyDir(t *testing.T) {
 	}
 }
 
+func TestBackendKindRoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", oldHome)
+	os.Setenv("HOME", tmpDir)
+
+	user, repo, quant := "u", "r", "Q4_K_M"
+	if err := os.MkdirAll(GetModelPath(user, repo), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Unknown model → "gguf" as the legacy default.
+	got, err := GetBackendKind(user, repo, quant)
+	if err != nil {
+		t.Fatalf("GetBackendKind: %v", err)
+	}
+	if got != BackendGGUF {
+		t.Errorf("default kind = %q, want %q", got, BackendGGUF)
+	}
+
+	if err := SetBackendKind(user, repo, quant, BackendMLX); err != nil {
+		t.Fatalf("SetBackendKind: %v", err)
+	}
+	got, err = GetBackendKind(user, repo, quant)
+	if err != nil {
+		t.Fatalf("GetBackendKind: %v", err)
+	}
+	if got != BackendMLX {
+		t.Errorf("after set, kind = %q, want %q", got, BackendMLX)
+	}
+
+	// DownloadedAt auto-filled on first write.
+	meta, err := LoadMetadata(user, repo)
+	if err != nil {
+		t.Fatalf("LoadMetadata: %v", err)
+	}
+	if meta.Quants[quant].DownloadedAt.IsZero() {
+		t.Error("DownloadedAt was not set")
+	}
+
+	// Overwriting kind should keep DownloadedAt.
+	first := meta.Quants[quant].DownloadedAt
+	if err := SetBackendKind(user, repo, quant, BackendGGUF); err != nil {
+		t.Fatalf("SetBackendKind: %v", err)
+	}
+	meta, _ = LoadMetadata(user, repo)
+	if !meta.Quants[quant].DownloadedAt.Equal(first) {
+		t.Error("DownloadedAt should not change on rewrite")
+	}
+
+	// Empty Backend in metadata still reports gguf.
+	q := meta.Quants[quant]
+	q.Backend = ""
+	meta.Quants[quant] = q
+	if err := SaveMetadata(user, repo, meta); err != nil {
+		t.Fatalf("SaveMetadata: %v", err)
+	}
+	got, err = GetBackendKind(user, repo, quant)
+	if err != nil {
+		t.Fatalf("GetBackendKind: %v", err)
+	}
+	if got != BackendGGUF {
+		t.Errorf("empty field kind = %q, want %q", got, BackendGGUF)
+	}
+}
+
 func TestFindModelFileSingleFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	oldHome := os.Getenv("HOME")
