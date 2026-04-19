@@ -20,13 +20,15 @@ type ChatSession struct {
 	messages []server.ChatMessage
 
 	// Options
-	systemPrompt  string
-	maxTokens     int
-	temp          float64
-	topP          float64
-	topK          int
-	repeatPenalty float64
-	minP          float64
+	systemPrompt     string
+	maxTokens        int
+	temp             float64
+	topP             float64
+	topK             int
+	repeatPenalty    float64
+	presencePenalty  float64
+	frequencyPenalty float64
+	minP             float64
 }
 
 // NewChatSession creates a new chat session.
@@ -46,11 +48,13 @@ func (s *ChatSession) SetSystemPrompt(prompt string) {
 }
 
 // SetSamplingOptions sets the sampling parameters for generation.
-func (s *ChatSession) SetSamplingOptions(temp, topP, minP, repeatPenalty float64, topK, maxTokens int) {
+func (s *ChatSession) SetSamplingOptions(temp, topP, minP, repeatPenalty, presencePenalty, frequencyPenalty float64, topK, maxTokens int) {
 	s.temp = temp
 	s.topP = topP
 	s.minP = minP
 	s.repeatPenalty = repeatPenalty
+	s.presencePenalty = presencePenalty
+	s.frequencyPenalty = frequencyPenalty
 	s.topK = topK
 	s.maxTokens = maxTokens
 }
@@ -90,6 +94,8 @@ func (s *ChatSession) streamResponse() error {
 	req.TopK = s.resolver.ResolveInt(s.topK, "top-k")
 	req.MinP = s.resolver.ResolveFloat(s.minP, "min-p")
 	req.RepeatPenalty = s.resolver.ResolveFloat(s.repeatPenalty, "repeat-penalty")
+	req.PresencePenalty = s.resolver.ResolveFloat(s.presencePenalty, "presence-penalty")
+	req.FrequencyPenalty = s.resolver.ResolveFloat(s.frequencyPenalty, "frequency-penalty")
 
 	var fullResponse strings.Builder
 	hadReasoning := false

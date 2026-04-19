@@ -48,31 +48,17 @@ func (p *Persona) GetIntOption(key string, defaultVal int) int {
 	return defaultVal
 }
 
-// GetServerOptions returns a map of server options (ctx-size, gpu-layers, threads, etc.)
-// that should be passed to the model loading API.
+// GetServerOptions returns all persona options to pass to the model loading API.
+// Returns a shallow copy to prevent callers from mutating persona state.
 func (p *Persona) GetServerOptions() map[string]any {
-	if p == nil || p.Options == nil {
+	if p == nil || len(p.Options) == 0 {
 		return nil
 	}
-
-	// Server options that affect model loading
-	serverOptionKeys := []string{
-		"ctx-size", "gpu-layers", "threads",
-		"batch-size", "ubatch-size", "flash-attn",
-		"mlock", "cache-type-k", "cache-type-v",
+	out := make(map[string]any, len(p.Options))
+	for k, v := range p.Options {
+		out[k] = v
 	}
-
-	result := make(map[string]any)
-	for _, key := range serverOptionKeys {
-		if val, ok := p.Options[key]; ok {
-			result[key] = val
-		}
-	}
-
-	if len(result) == 0 {
-		return nil
-	}
-	return result
+	return out
 }
 
 const personasDir = "personas"

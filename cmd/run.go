@@ -23,13 +23,15 @@ import (
 )
 
 var (
-	tokens        int
-	temperature   float64
-	topP          float64
-	topK          int
-	minP          float64
-	repeatPenalty float64
-	systemPrompt  string
+	tokens           int
+	temperature      float64
+	topP             float64
+	topK             int
+	minP             float64
+	repeatPenalty    float64
+	presencePenalty  float64
+	frequencyPenalty float64
+	systemPrompt     string
 
 	// Server options (require model reload)
 	ctxSize   int
@@ -180,7 +182,7 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 
 			session := NewChatSession(api, modelName, cfg, activePersona)
 			session.SetSystemPrompt(systemPrompt)
-			session.SetSamplingOptions(temperature, topP, minP, repeatPenalty, topK, tokens)
+			session.SetSamplingOptions(temperature, topP, minP, repeatPenalty, presencePenalty, frequencyPenalty, topK, tokens)
 			if err := session.Run(promptArg); err != nil {
 				ui.Fatal("Chat failed: %v", err)
 			}
@@ -190,7 +192,7 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 		// Launch TUI for interactive mode
 		m := chat.New(api, modelName, cfg, activePersona, personaName)
 		m.SetInitialServerOptions(ctxSize, gpuLayers, threads, ctxSizeSet, gpuLayersSet, threadsSet)
-		m.SetSamplingOptions(temperature, topP, minP, repeatPenalty, topK, tokens)
+		m.SetSamplingOptions(temperature, topP, minP, repeatPenalty, presencePenalty, frequencyPenalty, topK, tokens)
 		m.SetSystemPrompt(systemPrompt)
 
 		p := tea.NewProgram(m, tea.WithAltScreen())
@@ -452,6 +454,8 @@ func init() {
 	runCmd.Flags().IntVar(&topK, "top-k", 0, "Top-k sampling")
 	runCmd.Flags().Float64Var(&minP, "min-p", 0, "Min-p sampling")
 	runCmd.Flags().Float64Var(&repeatPenalty, "repeat-penalty", 0, "Repeat penalty")
+	runCmd.Flags().Float64Var(&presencePenalty, "presence-penalty", 0, "Presence penalty")
+	runCmd.Flags().Float64Var(&frequencyPenalty, "frequency-penalty", 0, "Frequency penalty")
 	runCmd.Flags().IntVarP(&tokens, "predict", "n", 0, "Max tokens to generate")
 	runCmd.Flags().StringVarP(&systemPrompt, "system", "s", "", "System prompt")
 

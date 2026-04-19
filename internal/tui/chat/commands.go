@@ -50,7 +50,7 @@ func (m *Model) handleCommand(input string) tea.Cmd {
 		case "/set":
 			if len(args) < 2 {
 				return CommandResultMsg{
-					Message: "Usage: /set <option> <value>\nOptions: temp, top-p, top-k, repeat-penalty, min-p, ctx-size, gpu-layers, threads",
+					Message: "Usage: /set <option> <value>\nOptions: temp, top-p, top-k, repeat-penalty, presence-penalty, frequency-penalty, min-p, ctx-size, gpu-layers, threads",
 					IsError: true,
 				}
 			}
@@ -78,15 +78,17 @@ type setOption struct {
 }
 
 var setOptions = map[string]setOption{
-	"temp":           {useFloat: true, apply: func(m *Model, f float64, _ int) { m.options.Temp = f }},
-	"temperature":    {useFloat: true, apply: func(m *Model, f float64, _ int) { m.options.Temp = f }},
-	"top-p":          {useFloat: true, apply: func(m *Model, f float64, _ int) { m.options.TopP = f }},
-	"repeat-penalty": {useFloat: true, apply: func(m *Model, f float64, _ int) { m.options.RepeatPenalty = f }},
-	"min-p":          {useFloat: true, apply: func(m *Model, f float64, _ int) { m.options.MinP = f }},
-	"top-k":          {apply: func(m *Model, _ float64, i int) { m.options.TopK = i }},
-	"ctx-size":       {reload: true, apply: func(m *Model, _ float64, i int) { m.options.CtxSize = i; m.options.CtxSizeSet = true }},
-	"gpu-layers":     {reload: true, apply: func(m *Model, _ float64, i int) { m.options.GpuLayers = i; m.options.GpuLayersSet = true }},
-	"threads":        {reload: true, apply: func(m *Model, _ float64, i int) { m.options.Threads = i; m.options.ThreadsSet = true }},
+	"temp":              {useFloat: true, apply: func(m *Model, f float64, _ int) { m.options.Temp = f }},
+	"temperature":       {useFloat: true, apply: func(m *Model, f float64, _ int) { m.options.Temp = f }},
+	"top-p":             {useFloat: true, apply: func(m *Model, f float64, _ int) { m.options.TopP = f }},
+	"repeat-penalty":    {useFloat: true, apply: func(m *Model, f float64, _ int) { m.options.RepeatPenalty = f }},
+	"presence-penalty":  {useFloat: true, apply: func(m *Model, f float64, _ int) { m.options.PresencePenalty = f }},
+	"frequency-penalty": {useFloat: true, apply: func(m *Model, f float64, _ int) { m.options.FrequencyPenalty = f }},
+	"min-p":             {useFloat: true, apply: func(m *Model, f float64, _ int) { m.options.MinP = f }},
+	"top-k":             {apply: func(m *Model, _ float64, i int) { m.options.TopK = i }},
+	"ctx-size":          {reload: true, apply: func(m *Model, _ float64, i int) { m.options.CtxSize = i; m.options.CtxSizeSet = true }},
+	"gpu-layers":        {reload: true, apply: func(m *Model, _ float64, i int) { m.options.GpuLayers = i; m.options.GpuLayersSet = true }},
+	"threads":           {reload: true, apply: func(m *Model, _ float64, i int) { m.options.Threads = i; m.options.ThreadsSet = true }},
 }
 
 // handleSet processes the /set command
@@ -96,7 +98,7 @@ func (m *Model) handleSet(option, value string) CommandResultMsg {
 	opt, ok := setOptions[option]
 	if !ok {
 		return CommandResultMsg{
-			Message: fmt.Sprintf("Unknown option: %s\nOptions: temp/temperature, top-p, top-k, repeat-penalty, min-p, ctx-size, gpu-layers, threads", option),
+			Message: fmt.Sprintf("Unknown option: %s\nOptions: temp/temperature, top-p, top-k, repeat-penalty, presence-penalty, frequency-penalty, min-p, ctx-size, gpu-layers, threads", option),
 			IsError: true,
 		}
 	}
@@ -168,7 +170,7 @@ func (m *Model) helpText() string {
 		fmt.Fprintf(&sb, "  %-20s %s\n", names, cmd.Description)
 	}
 	sb.WriteString("\nOptions for /set:\n")
-	sb.WriteString("  temp, top-p, top-k, repeat-penalty, min-p\n")
+	sb.WriteString("  temp, top-p, top-k, repeat-penalty, presence-penalty, frequency-penalty, min-p\n")
 	sb.WriteString("  ctx-size*, gpu-layers*, threads*  (* require /reload)")
 	return sb.String()
 }
@@ -195,6 +197,8 @@ func (m *Model) showSettings() string {
 	sb.WriteString(m.formatOption("top-p", m.options.TopP, m.resolver.GetConfigFloat("top-p")))
 	sb.WriteString(m.formatOptionInt("top-k", m.options.TopK, m.resolver.GetConfigInt("top-k")))
 	sb.WriteString(m.formatOption("repeat-penalty", m.options.RepeatPenalty, m.resolver.GetConfigFloat("repeat-penalty")))
+	sb.WriteString(m.formatOption("presence-penalty", m.options.PresencePenalty, m.resolver.GetConfigFloat("presence-penalty")))
+	sb.WriteString(m.formatOption("frequency-penalty", m.options.FrequencyPenalty, m.resolver.GetConfigFloat("frequency-penalty")))
 	sb.WriteString(m.formatOption("min-p", m.options.MinP, m.resolver.GetConfigFloat("min-p")))
 	sb.WriteString("\n")
 

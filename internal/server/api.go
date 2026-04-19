@@ -26,17 +26,19 @@ type StreamOptions struct {
 }
 
 type ChatCompletionRequest struct {
-	Model           string         `json:"model"`
-	Messages        []ChatMessage  `json:"messages"`
-	Stream          bool           `json:"stream"`
-	StreamOptions   *StreamOptions `json:"stream_options,omitempty"`
-	Temperature     float64        `json:"temperature,omitempty"`
-	TopP            float64        `json:"top_p,omitempty"`
-	TopK            int            `json:"top_k,omitempty"`
-	MinP            float64        `json:"min_p,omitempty"`
-	RepeatPenalty   float64        `json:"repeat_penalty,omitempty"`
-	MaxTokens       int            `json:"max_tokens,omitempty"`
-	ReasoningFormat string         `json:"reasoning_format,omitempty"`
+	Model            string         `json:"model"`
+	Messages         []ChatMessage  `json:"messages"`
+	Stream           bool           `json:"stream"`
+	StreamOptions    *StreamOptions `json:"stream_options,omitempty"`
+	Temperature      float64        `json:"temperature,omitempty"`
+	TopP             float64        `json:"top_p,omitempty"`
+	TopK             int            `json:"top_k,omitempty"`
+	MinP             float64        `json:"min_p,omitempty"`
+	RepeatPenalty    float64        `json:"repeat_penalty,omitempty"`
+	PresencePenalty  float64        `json:"presence_penalty,omitempty"`
+	FrequencyPenalty float64        `json:"frequency_penalty,omitempty"`
+	MaxTokens        int            `json:"max_tokens,omitempty"`
+	ReasoningFormat  string         `json:"reasoning_format,omitempty"`
 }
 
 type ChatCompletionResponse struct {

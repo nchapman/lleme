@@ -235,6 +235,79 @@ func TestGetOptionHelpers(t *testing.T) {
 	})
 }
 
+func TestGetServerOptions(t *testing.T) {
+	t.Run("nil persona returns nil", func(t *testing.T) {
+		var p *Persona
+		if got := p.GetServerOptions(); got != nil {
+			t.Errorf("Expected nil, got %v", got)
+		}
+	})
+
+	t.Run("empty options returns nil", func(t *testing.T) {
+		p := &Persona{}
+		if got := p.GetServerOptions(); got != nil {
+			t.Errorf("Expected nil, got %v", got)
+		}
+	})
+
+	t.Run("returns all options without filtering", func(t *testing.T) {
+		p := &Persona{
+			Options: map[string]any{
+				"ctx-size":             4096,
+				"gpu-layers":           -1,
+				"temp":                 0.7,
+				"presence-penalty":     1.5,
+				"frequency-penalty":    0.2,
+				"chat-template-kwargs": `{"enable_thinking":false}`,
+				"dry-multiplier":       0.8,
+			},
+		}
+		got := p.GetServerOptions()
+		if got == nil {
+			t.Fatal("Expected non-nil options")
+		}
+		want := map[string]any{
+			"ctx-size":             4096,
+			"gpu-layers":           -1,
+			"temp":                 0.7,
+			"presence-penalty":     1.5,
+			"frequency-penalty":    0.2,
+			"chat-template-kwargs": `{"enable_thinking":false}`,
+			"dry-multiplier":       0.8,
+		}
+		for key, wantVal := range want {
+			gotVal, ok := got[key]
+			if !ok {
+				t.Errorf("Missing key %q in result", key)
+				continue
+			}
+			if gotVal != wantVal {
+				t.Errorf("Key %q: got %v, want %v", key, gotVal, wantVal)
+			}
+		}
+		if len(got) != len(want) {
+			t.Errorf("Expected %d keys, got %d", len(want), len(got))
+		}
+	})
+
+	t.Run("returns a copy, not the original map", func(t *testing.T) {
+		opts := map[string]any{"temp": 0.8}
+		p := &Persona{Options: opts}
+		got := p.GetServerOptions()
+		if got == nil {
+			t.Fatal("Expected non-nil options")
+		}
+		if len(got) != 1 {
+			t.Errorf("Expected 1 key, got %d", len(got))
+		}
+		// Mutating the returned map must not affect the persona's options.
+		got["injected"] = true
+		if _, ok := p.Options["injected"]; ok {
+			t.Error("Mutating returned map affected persona options — expected a copy")
+		}
+	})
+}
+
 func TestEnsureDirectories(t *testing.T) {
 	tmpDir := t.TempDir()
 	oldHome := os.Getenv("HOME")

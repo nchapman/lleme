@@ -97,12 +97,14 @@ type Model struct {
 // SessionOptions holds runtime-adjustable options for the chat session
 type SessionOptions struct {
 	// Request-time options (no restart needed)
-	Temp          float64
-	TopP          float64
-	TopK          int
-	RepeatPenalty float64
-	MinP          float64
-	MaxTokens     int
+	Temp             float64
+	TopP             float64
+	TopK             int
+	RepeatPenalty    float64
+	PresencePenalty  float64
+	FrequencyPenalty float64
+	MinP             float64
+	MaxTokens        int
 
 	// Server options (require model reload)
 	CtxSize   int
@@ -162,25 +164,15 @@ func (m *Model) SetInitialServerOptions(ctxSize, gpuLayers, threads int, ctxSize
 }
 
 // SetSamplingOptions sets the sampling options from CLI flags
-func (m *Model) SetSamplingOptions(temp, topP, minP, repeatPenalty float64, topK, maxTokens int) {
-	if temp != 0 {
-		m.options.Temp = temp
-	}
-	if topP != 0 {
-		m.options.TopP = topP
-	}
-	if topK != 0 {
-		m.options.TopK = topK
-	}
-	if minP != 0 {
-		m.options.MinP = minP
-	}
-	if repeatPenalty != 0 {
-		m.options.RepeatPenalty = repeatPenalty
-	}
-	if maxTokens != 0 {
-		m.options.MaxTokens = maxTokens
-	}
+func (m *Model) SetSamplingOptions(temp, topP, minP, repeatPenalty, presencePenalty, frequencyPenalty float64, topK, maxTokens int) {
+	m.options.Temp = temp
+	m.options.TopP = topP
+	m.options.TopK = topK
+	m.options.MinP = minP
+	m.options.RepeatPenalty = repeatPenalty
+	m.options.PresencePenalty = presencePenalty
+	m.options.FrequencyPenalty = frequencyPenalty
+	m.options.MaxTokens = maxTokens
 }
 
 // SetSystemPrompt sets a system prompt override from CLI flags
@@ -505,6 +497,8 @@ func (m *Model) sendMessage(content string) tea.Cmd {
 	req.TopK = m.resolver.ResolveInt(m.options.TopK, "top-k")
 	req.MinP = m.resolver.ResolveFloat(m.options.MinP, "min-p")
 	req.RepeatPenalty = m.resolver.ResolveFloat(m.options.RepeatPenalty, "repeat-penalty")
+	req.PresencePenalty = m.resolver.ResolveFloat(m.options.PresencePenalty, "presence-penalty")
+	req.FrequencyPenalty = m.resolver.ResolveFloat(m.options.FrequencyPenalty, "frequency-penalty")
 
 	streamCmd := func() tea.Msg {
 		var fullContent strings.Builder
