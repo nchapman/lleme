@@ -5,12 +5,7 @@ Drop-in replacement for OpenAI **and** Anthropic APIs — works with Claude Code
 
 [![Release](https://img.shields.io/github/v/release/nchapman/lleme?color=blue)](https://github.com/nchapman/lleme/releases)
 
-<video src="https://tilde.quest/~nchapman/media/videos/lleme-demo.mp4"
-       autoplay loop muted playsinline
-       width="720">
-  <img src="https://tilde.quest/~nchapman/media/videos/lleme-demo.gif"
-       alt="lleme demo" width="720">
-</video>
+![lleme demo](https://tilde.quest/~nchapman/media/videos/lleme-demo.gif)
 
 - **Run any model from Hugging Face.** No custom registries or manual setup. Just `lleme run user/repo` to start chatting immediately.
 - **OpenAI & Anthropic APIs.** A single port serves both protocols natively. It's a drop-in replacement for Claude Code, Aider, and any other AI tool.
@@ -75,7 +70,7 @@ Claude Code issues requests to lleme, which loads the model on demand.
 
 ## Features
 
-### One port, two APIs
+### OpenAI & Anthropic Support
 
 OpenAI and Anthropic protocols live on the same endpoint. Point any existing client at `http://localhost:11313` — no other changes needed.
 
@@ -111,23 +106,6 @@ lleme list               # show downloaded models
 lleme remove --older-than 30d
 ```
 
-## FAQ
-
-### How does this compare to Ollama or LM Studio?
-
-- **No background daemons.** `lleme` is a single Go binary. It doesn't install persistent background services or tray icons that stay running when you're not using them.
-- **Honest about the engine.** We don't hide that we use `llama.cpp`. `lleme` acts as a high-level manager for the industry-standard inference engine, providing better defaults and a dual-protocol API.
-- **True Hugging Face native.** We don't maintain a separate model library. If a GGUF exists on Hugging Face, it's available in `lleme` immediately with no republishing required.
-- **Native Anthropic support.** Most local runners only support the OpenAI API. `lleme` speaks both OpenAI and Anthropic natively, making it a drop-in backend for tools like Claude Code.
-
-### Does it support vision models?
-
-Yes — lleme pulls the `mmproj` projector file alongside the GGUF when present and passes `--mmproj` to `llama-server`. Tested on the Gemma 3, Gemma 4, and Qwen3-VL families.
-
-### Do I need a Hugging Face account?
-
-Only for gated models (Llama, some Google releases). Get a token at https://huggingface.co/settings/tokens and either run `hf auth login` or export `HF_TOKEN=hf_xxxxx`.
-
 ## Commands
 
 | Category | Command | Description |
@@ -158,7 +136,7 @@ lleme remove user/repo:quant         # specific quantization
 lleme remove user/repo               # all quantizations of a model
 lleme remove user/*                  # all models from a user
 lleme remove *                       # everything
-lleme remove --older-than 30d        # unused in 30 days (4w, 1y also work)
+lleme remove --older-than 30d        # unused in 30 days (also accepts h, w)
 lleme remove --larger-than 10GB      # larger than 10GB
 lleme remove user/* --older-than 7d  # combine pattern and filter
 ```
@@ -205,7 +183,7 @@ CLI flags always win, followed by persona settings, then global config. This mea
 ## Requirements
 
 - **macOS** (Apple Silicon or Intel) or **Linux** (x86_64, ARM64).
-- **GPU**: Metal (macOS) and CUDA (Linux) are supported via `llama.cpp`.
+- **GPU**: Metal (macOS) and Vulkan (Linux) are supported via `llama.cpp`. NVIDIA, AMD, and Intel GPUs work through the Vulkan backend when `libvulkan` is present.
 - **Memory**: 8GB RAM is enough for small models; 32GB+ is recommended for 30B+ models.
 - **Disk**: Models range from 2GB to 50GB+. Check `lleme info <model>` before pulling.
 
