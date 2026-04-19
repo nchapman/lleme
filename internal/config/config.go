@@ -4,9 +4,39 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// Duration wraps time.Duration so YAML can parse strings like "10m".
+// A zero value means "not configured" — callers should fall back to their
+// own default rather than treating it as an explicit request for zero.
+type Duration time.Duration
+
+func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode {
+		return fmt.Errorf("duration must be a scalar string (e.g. \"10m\"), got %s", node.Tag)
+	}
+	if node.Tag != "" && node.Tag != "!!str" {
+		return fmt.Errorf("duration must be a string like \"10m\" or \"30s\" — got bare %s; try quoting it or adding a unit", node.Tag)
+	}
+	parsed, err := time.ParseDuration(node.Value)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", node.Value, err)
+	}
+	*d = Duration(parsed)
+	return nil
+}
+
+func (d Duration) MarshalYAML() (any, error) {
+	return time.Duration(d).String(), nil
+}
+
+// AsDuration returns the wrapped time.Duration.
+func (d Duration) AsDuration() time.Duration {
+	return time.Duration(d)
+}
 
 // DefaultSystemPrompt returns the default system prompt for chat sessions.
 func DefaultSystemPrompt() string {
@@ -30,14 +60,14 @@ type LlamaCpp struct {
 }
 
 type Server struct {
-	Host            string   `yaml:"host"`
-	Port            int      `yaml:"port"`
-	MaxModels       int      `yaml:"max_models"`
-	IdleTimeoutMins int      `yaml:"idle_timeout_mins"`
-	StartupTimeoutS int      `yaml:"startup_timeout_secs"`
-	BackendPortMin  int      `yaml:"backend_port_min"`
-	BackendPortMax  int      `yaml:"backend_port_max"`
-	CORSOrigins     []string `yaml:"cors_origins,omitempty"`
+	Host           string   `yaml:"host"`
+	Port           int      `yaml:"port"`
+	MaxModels      int      `yaml:"max_models"`
+	IdleTimeout    Duration `yaml:"idle_timeout"`
+	StartupTimeout Duration `yaml:"startup_timeout"`
+	BackendPortMin int      `yaml:"backend_port_min"`
+	BackendPortMax int      `yaml:"backend_port_max"`
+	CORSOrigins    []string `yaml:"cors_origins,omitempty"`
 }
 
 const (
@@ -100,13 +130,13 @@ func DefaultConfig() *Config {
 		},
 		LlamaCpp: LlamaCpp{},
 		Server: Server{
-			Host:            "127.0.0.1",
-			Port:            11313,
-			MaxModels:       3,
-			IdleTimeoutMins: 10,
-			StartupTimeoutS: 120,
-			BackendPortMin:  49152,
-			BackendPortMax:  49200,
+			Host:           "127.0.0.1",
+			Port:           11313,
+			MaxModels:      3,
+			IdleTimeout:    Duration(10 * time.Minute),
+			StartupTimeout: Duration(2 * time.Minute),
+			BackendPortMin: 49152,
+			BackendPortMax: 49200,
 			CORSOrigins: []string{
 				"http://localhost",
 				"http://127.0.0.1",
@@ -130,8 +160,8 @@ server:
   host: 127.0.0.1
   port: 11313
   max_models: 3              # Max concurrent models in memory
-  idle_timeout_mins: 10      # Unload idle models after this time
-  startup_timeout_secs: 120  # Max time to wait for model to load
+  idle_timeout: 10m          # Unload idle models after this duration (e.g. 30s, 10m, 1h)
+  startup_timeout: 2m        # Max time to wait for model to load
   backend_port_min: 49152    # Port range for llama-server backends
   backend_port_max: 49200
   cors_origins:              # Allowed CORS origins

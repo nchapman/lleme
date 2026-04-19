@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -79,6 +82,8 @@ server:
   host: 0.0.0.0
   port: 9000
   max_models: 5
+  idle_timeout: 30m
+  startup_timeout: 3m
 `
 		configPath := filepath.Join(configDir, "config.yaml")
 		if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
@@ -123,6 +128,12 @@ server:
 		}
 		if cfg.Server.MaxModels != 5 {
 			t.Errorf("Expected Server.MaxModels 5, got %d", cfg.Server.MaxModels)
+		}
+		if got := cfg.Server.IdleTimeout.AsDuration(); got != 30*time.Minute {
+			t.Errorf("Expected Server.IdleTimeout 30m, got %v", got)
+		}
+		if got := cfg.Server.StartupTimeout.AsDuration(); got != 3*time.Minute {
+			t.Errorf("Expected Server.StartupTimeout 3m, got %v", got)
 		}
 	})
 
@@ -316,6 +327,69 @@ func TestEnsureDirectories(t *testing.T) {
 			t.Errorf("Expected directory %s to exist", dir)
 		}
 	}
+}
+
+func TestDurationYAML(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  time.Duration
+	}{
+		{"minutes", "idle_timeout: 10m\n", 10 * time.Minute},
+		{"seconds", "idle_timeout: 30s\n", 30 * time.Second},
+		{"hours", "idle_timeout: 2h\n", 2 * time.Hour},
+		{"compound", "idle_timeout: 1h30m\n", 90 * time.Minute},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var s Server
+			if err := yaml.Unmarshal([]byte(tt.input), &s); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := s.IdleTimeout.AsDuration(); got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("invalid duration returns error", func(t *testing.T) {
+		var s Server
+		err := yaml.Unmarshal([]byte("idle_timeout: not-a-duration\n"), &s)
+		if err == nil {
+			t.Error("expected error for invalid duration, got nil")
+		}
+	})
+
+	t.Run("bare integer rejected with guiding message", func(t *testing.T) {
+		var s Server
+		err := yaml.Unmarshal([]byte("idle_timeout: 600\n"), &s)
+		if err == nil {
+			t.Fatal("expected error for bare integer, got nil")
+		}
+		if !strings.Contains(err.Error(), "unit") && !strings.Contains(err.Error(), "string") {
+			t.Errorf("error message should guide user toward string form, got: %v", err)
+		}
+	})
+
+	t.Run("non-scalar rejected", func(t *testing.T) {
+		var s Server
+		err := yaml.Unmarshal([]byte("idle_timeout: [10, m]\n"), &s)
+		if err == nil {
+			t.Error("expected error for non-scalar input, got nil")
+		}
+	})
+
+	t.Run("round-trips through marshal", func(t *testing.T) {
+		s := Server{IdleTimeout: Duration(15 * time.Minute)}
+		data, err := yaml.Marshal(&s)
+		if err != nil {
+			t.Fatalf("marshal failed: %v", err)
+		}
+		if !strings.Contains(string(data), "idle_timeout: 15m0s") {
+			t.Errorf("expected marshal to contain 'idle_timeout: 15m0s', got: %s", data)
+		}
+	})
 }
 
 func TestPathHelpers(t *testing.T) {

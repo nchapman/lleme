@@ -185,8 +185,11 @@ func ConfigFromAppConfig(s config.Server) *Config {
 	if s.MaxModels > 0 {
 		cfg.MaxModels = s.MaxModels
 	}
-	if s.IdleTimeoutMins > 0 {
-		cfg.IdleTimeout = time.Duration(s.IdleTimeoutMins) * time.Minute
+	// Duration zero-value means "not configured" → keep the proxy default.
+	// A user who writes `idle_timeout: 0s` will get the default too; "never
+	// unload" is not supported via zero — use a very large duration instead.
+	if s.IdleTimeout > 0 {
+		cfg.IdleTimeout = s.IdleTimeout.AsDuration()
 	}
 	if s.BackendPortMin > 0 {
 		cfg.BackendPortMin = s.BackendPortMin
@@ -194,8 +197,8 @@ func ConfigFromAppConfig(s config.Server) *Config {
 	if s.BackendPortMax > 0 {
 		cfg.BackendPortMax = s.BackendPortMax
 	}
-	if s.StartupTimeoutS > 0 {
-		cfg.StartupTimeout = time.Duration(s.StartupTimeoutS) * time.Second
+	if s.StartupTimeout > 0 {
+		cfg.StartupTimeout = s.StartupTimeout.AsDuration()
 	}
 	if len(s.CORSOrigins) > 0 {
 		cfg.CORSOrigins = s.CORSOrigins
