@@ -1,0 +1,8 @@
+name: DeepSeek-V3-0324
+source: https://unsloth.ai/docs/models/tutorials/deepseek-v3-0324-how-to-run-locally.md
+match:
+  - "*/DeepSeek-V3-0324-*"
+  - "*/DeepSeek-V3-0324"
+options:
+  temp: 0.3
+  min-p: 0.0

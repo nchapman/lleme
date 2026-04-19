@@ -1,0 +1,9 @@
+name: Qwen3-VL Thinking
+source: https://unsloth.ai/docs/models/tutorials/qwen3-how-to-run-and-fine-tune/qwen3-vl-how-to-run-and-fine-tune.md
+match:
+  - "*/Qwen3-VL-*-Thinking*"
+options:
+  temp: 1.0
+  top-p: 0.95
+  top-k: 20
+  min-p: 0.0

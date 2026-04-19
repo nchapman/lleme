@@ -1,0 +1,9 @@
+name: Qwen3-Next Thinking
+source: https://unsloth.ai/docs/models/tutorials/qwen3-next.md
+match:
+  - "*/Qwen3-Next-*-Thinking*"
+options:
+  temp: 0.6
+  top-p: 0.95
+  top-k: 20
+  min-p: 0.0

@@ -1,0 +1,9 @@
+name: QwQ
+source: https://unsloth.ai/docs/models/tutorials/qwq-32b-how-to-run-effectively.md
+match:
+  - "*/QwQ-*"
+options:
+  temp: 0.6
+  top-p: 0.95
+  top-k: 40
+  min-p: 0.0

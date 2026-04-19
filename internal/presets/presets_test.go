@@ -114,6 +114,189 @@ func TestFind(t *testing.T) {
 			modelName: "openai/gpt-oss-120b:Q4_K_M",
 			wantName:  "GPT OSS",
 		},
+
+		// Qwen sub-families — all must win against the more generic Qwen3 preset.
+		{
+			name:      "Qwen3-Coder wins over Qwen3",
+			modelName: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M",
+			wantName:  "Qwen3-Coder",
+		},
+		{
+			name:      "Qwen3-Coder-Next wins over Qwen3-Coder",
+			modelName: "unsloth/Qwen3-Coder-Next-GGUF:UD-Q4_K_XL",
+			wantName:  "Qwen3-Coder-Next",
+		},
+		{
+			name:      "Qwen3-Next Instruct wins over Qwen3",
+			modelName: "unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF:Q4_K_M",
+			wantName:  "Qwen3-Next Instruct",
+		},
+		{
+			name:      "Qwen3-Next Thinking",
+			modelName: "unsloth/Qwen3-Next-80B-A3B-Thinking-GGUF:Q4_K_M",
+			wantName:  "Qwen3-Next Thinking",
+		},
+		{
+			name:      "Qwen3-VL Instruct",
+			modelName: "unsloth/Qwen3-VL-8B-Instruct-GGUF:UD-Q4_K_XL",
+			wantName:  "Qwen3-VL Instruct",
+		},
+		{
+			name:      "Qwen3-VL Thinking",
+			modelName: "unsloth/Qwen3-VL-30B-A3B-Thinking-GGUF:Q4_K_XL",
+			wantName:  "Qwen3-VL Thinking",
+		},
+		{
+			name:      "QwQ",
+			modelName: "unsloth/QwQ-32B-GGUF:Q4_K_M",
+			wantName:  "QwQ",
+		},
+
+		// DeepSeek — R1-0528 and V3-0324 must win over their more-general siblings.
+		{
+			name:      "DeepSeek-R1-0528 wins over DeepSeek-R1",
+			modelName: "unsloth/DeepSeek-R1-0528-GGUF:UD-Q4_K_XL",
+			wantName:  "DeepSeek-R1-0528",
+		},
+		{
+			name:      "DeepSeek-R1 base",
+			modelName: "unsloth/DeepSeek-R1-GGUF:UD-IQ1_S",
+			wantName:  "DeepSeek-R1",
+		},
+		{
+			name:      "DeepSeek-V3-0324",
+			modelName: "unsloth/DeepSeek-V3-0324-GGUF:UD-Q2_K_XL",
+			wantName:  "DeepSeek-V3-0324",
+		},
+		{
+			name:      "DeepSeek-V3.1 Terminus",
+			modelName: "unsloth/DeepSeek-V3.1-Terminus-GGUF:UD-Q4_K_XL",
+			wantName:  "DeepSeek-V3.1",
+		},
+
+		// GLM — 5.1 must win over 5 for version-5.1 repos.
+		{
+			name:      "GLM-5.1",
+			modelName: "unsloth/GLM-5.1-GGUF:Q4_K_M",
+			wantName:  "GLM-5.1",
+		},
+		{
+			name:      "GLM-5 base",
+			modelName: "unsloth/GLM-5-GGUF:Q4_K_M",
+			wantName:  "GLM-5",
+		},
+
+		// Gemma — 3, 3n, 4, and FunctionGemma must be distinct.
+		{
+			name:      "Gemma 3",
+			modelName: "unsloth/gemma-3-27b-it-GGUF:Q4_K_M",
+			wantName:  "Gemma 3",
+		},
+		{
+			name:      "Gemma 3n does not match Gemma 3",
+			modelName: "unsloth/gemma-3n-E4B-it-GGUF:Q4_K_M",
+			wantName:  "Gemma 3n",
+		},
+		{
+			name:      "FunctionGemma",
+			modelName: "unsloth/FunctionGemma-270m-it-GGUF:Q4_K_M",
+			wantName:  "FunctionGemma",
+		},
+
+		// MiniMax.
+		{
+			name:      "MiniMax M2.5",
+			modelName: "unsloth/MiniMax-M2.5-GGUF:UD-Q4_K_XL",
+			wantName:  "MiniMax M2.5",
+		},
+		{
+			name:      "MiniMax M2.7",
+			modelName: "MiniMaxAI/MiniMax-M2.7",
+			wantName:  "MiniMax M2.7",
+		},
+
+		// Kimi — K2.5 and K2-Thinking must win over K2 base.
+		{
+			name:      "Kimi-K2.5",
+			modelName: "unsloth/Kimi-K2.5-GGUF:UD-Q2_K_XL",
+			wantName:  "Kimi-K2.5",
+		},
+		{
+			name:      "Kimi-K2 Thinking",
+			modelName: "moonshotai/Kimi-K2-Thinking",
+			wantName:  "Kimi-K2 Thinking",
+		},
+		{
+			name:      "Kimi-K2 Instruct base",
+			modelName: "moonshotai/Kimi-K2-Instruct",
+			wantName:  "Kimi-K2",
+		},
+		{
+			name:      "Kimi-K2 bare GGUF repo",
+			modelName: "unsloth/Kimi-K2-GGUF:Q4_K_M",
+			wantName:  "Kimi-K2",
+		},
+
+		// Nemotron — single preset covers both Nemotron-3 and NVIDIA-Nemotron-3 namespacing.
+		{
+			name:      "Nemotron 3 Super",
+			modelName: "unsloth/NVIDIA-Nemotron-3-Super-120B-A12B-GGUF:UD-Q4_K_XL",
+			wantName:  "Nemotron 3",
+		},
+		{
+			name:      "Nemotron 3 Nano",
+			modelName: "unsloth/Nemotron-3-Nano-30B-A3B-GGUF",
+			wantName:  "Nemotron 3",
+		},
+
+		// Mistral family.
+		{
+			name:      "Magistral",
+			modelName: "unsloth/Magistral-Small-2509-GGUF:UD-Q4_K_XL",
+			wantName:  "Magistral",
+		},
+		{
+			name:      "Devstral",
+			modelName: "bartowski/Devstral-Small-2507-GGUF:Q4_K_M",
+			wantName:  "Devstral",
+		},
+		{
+			name:      "Ministral 3 Instruct",
+			modelName: "unsloth/Ministral-3-14B-Instruct-2512-GGUF:Q4_K_M",
+			wantName:  "Ministral 3 Instruct",
+		},
+		{
+			name:      "Ministral 3 Reasoning",
+			modelName: "unsloth/Ministral-3-8B-Reasoning-2512-GGUF:Q4_K_M",
+			wantName:  "Ministral 3 Reasoning",
+		},
+
+		// Misc.
+		{
+			name:      "Llama 4 Scout",
+			modelName: "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+			wantName:  "Llama 4",
+		},
+		{
+			name:      "Llama 4 Maverick GGUF",
+			modelName: "unsloth/Llama-4-Maverick-17B-128E-Instruct-GGUF",
+			wantName:  "Llama 4",
+		},
+		{
+			name:      "Grok 2",
+			modelName: "unsloth/grok-2-GGUF:UD-Q3_K_XL",
+			wantName:  "Grok 2",
+		},
+		{
+			name:      "Phi-4 Reasoning",
+			modelName: "microsoft/Phi-4-reasoning-plus",
+			wantName:  "Phi-4 Reasoning",
+		},
+		{
+			name:      "Phi-4 mini reasoning",
+			modelName: "unsloth/Phi-4-mini-reasoning-GGUF:Q4_K_M",
+			wantName:  "Phi-4 Reasoning",
+		},
 	}
 
 	for _, tt := range tests {

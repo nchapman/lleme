@@ -1,0 +1,7 @@
+name: Kimi-K2 Thinking
+source: https://unsloth.ai/docs/models/tutorials/kimi-k2-thinking-how-to-run-locally.md
+match:
+  - "*/Kimi-K2-Thinking*"
+options:
+  temp: 1.0
+  min-p: 0.01

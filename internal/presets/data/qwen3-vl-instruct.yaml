@@ -1,0 +1,10 @@
+name: Qwen3-VL Instruct
+source: https://unsloth.ai/docs/models/tutorials/qwen3-how-to-run-and-fine-tune/qwen3-vl-how-to-run-and-fine-tune.md
+match:
+  - "*/Qwen3-VL-*-Instruct*"
+options:
+  temp: 0.7
+  top-p: 0.8
+  top-k: 20
+  min-p: 0.0
+  presence-penalty: 1.5

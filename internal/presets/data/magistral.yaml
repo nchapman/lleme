@@ -1,0 +1,8 @@
+name: Magistral
+source: https://unsloth.ai/docs/models/tutorials/magistral-how-to-run-and-fine-tune.md
+match:
+  - "*/Magistral-*"
+options:
+  temp: 0.7
+  top-p: 0.95
+  min-p: 0.01

@@ -1,0 +1,8 @@
+name: Grok 2
+source: https://unsloth.ai/docs/models/tutorials/grok-2.md
+match:
+  - "*/grok-2*"
+options:
+  temp: 1.0
+  top-p: 0.95
+  min-p: 0.01

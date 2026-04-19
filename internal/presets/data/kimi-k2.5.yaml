@@ -1,0 +1,8 @@
+name: Kimi-K2.5
+source: https://unsloth.ai/docs/models/kimi-k2.5.md
+match:
+  - "*/Kimi-K2.5*"
+options:
+  temp: 0.6
+  top-p: 0.95
+  min-p: 0.01

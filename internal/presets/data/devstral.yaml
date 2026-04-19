@@ -1,0 +1,9 @@
+name: Devstral
+source: https://unsloth.ai/docs/models/tutorials/devstral-how-to-run-and-fine-tune.md
+match:
+  - "*/Devstral-*"
+options:
+  temp: 0.15
+  top-p: 0.95
+  top-k: 64
+  min-p: 0.01
