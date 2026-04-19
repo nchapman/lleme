@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/nchapman/lleme/internal/config"
+	"github.com/nchapman/lleme/internal/logs"
 	"github.com/nchapman/lleme/internal/swiftlm"
 )
 
@@ -151,7 +152,12 @@ func mapSwiftLMOptions(opts map[string]any) []string {
 		}
 		flag, ok := swiftlmValueFlags[key]
 		if !ok {
-			continue // silently drop unsupported keys
+			// Log at debug so typos in swiftlm.options leave a trail
+			// without polluting default output — users legitimately share
+			// options between backends via preset/persona, so most drops
+			// are intentional.
+			logs.Debug("dropping unsupported SwiftLM option", "key", rawKey)
+			continue
 		}
 		switch v := value.(type) {
 		case int:
@@ -192,13 +198,52 @@ func isTruthy(v any) bool {
 	return false
 }
 
-// IsStartupError scans the backend log for SwiftLM's error marker. The
-// binary prints a plain `Error: ...` line (no prefix) when arg parsing or
-// model loading fails, and keeps running otherwise. We only treat an Error
-// line as fatal if it appears before any serving-ready marker — SwiftLM
-// prints `[SwiftLM]` progress lines during model load that we don't want to
-// misread. Today any Error: line is fatal (server exits), so the simple
-// scan is correct; revisit if SwiftLM grows non-fatal Error: logs.
+// swiftLMStartupErrorMarkers lists the shapes SwiftLM emits when it fails
+// to come up. The binary is a Swift ArgumentParser app, so it prints a
+// plain `Error: …` for arg-validation failures. Runtime failures — OOM via
+// fatalError, a forced-try on missing weights, a bad model path — surface
+// as `Fatal error:` lines (sometimes prefixed with `Swift/<file>:…` stacks
+// or `Thread 1:`). Missing metallib or dylib dependencies abort via dyld
+// before any model code runs, producing `dyld[...]: ... Library not
+// loaded` on stderr.
+//
+// Ordering is significant only for marker documentation; lineIndicatesStartupError
+// returns on first match. `substr` markers use strings.Contains so they catch
+// variants like `Thread 1: Fatal error: ...` and `Swift/ErrorType.swift:XX:
+// Fatal error: 'try!' expression …`.
+type swiftLMMarker struct {
+	kind string // "prefix" or "substr"
+	text string
+}
+
+var swiftLMStartupErrorMarkers = []swiftLMMarker{
+	{kind: "prefix", text: "Error:"},
+	{kind: "prefix", text: "Fatal error:"},
+	{kind: "prefix", text: "fatal error:"},
+	{kind: "substr", text: "Fatal error"}, // covers "Swift/X: Fatal error" and "Thread 1: Fatal error"
+	{kind: "substr", text: "Library not loaded"},
+}
+
+func lineIndicatesStartupError(line string) bool {
+	for _, m := range swiftLMStartupErrorMarkers {
+		switch m.kind {
+		case "prefix":
+			if strings.HasPrefix(line, m.text) {
+				return true
+			}
+		case "substr":
+			if strings.Contains(line, m.text) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IsStartupError scans the backend log for any shape SwiftLM uses to
+// signal a startup failure. SwiftLM prints `[SwiftLM]` progress lines
+// during model load which we don't want to misread — every marker above
+// is narrow enough that the progress output can't accidentally match.
 func (r *SwiftLMRuntime) IsStartupError(logPath string) bool {
 	file, err := os.Open(logPath)
 	if err != nil {
@@ -207,13 +252,12 @@ func (r *SwiftLMRuntime) IsStartupError(logPath string) bool {
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
-	// Default buffer caps at 64 KiB; a long path embedded in an Error: line
+	// Default buffer caps at 64 KiB; a long path embedded in an error line
 	// would otherwise silently truncate and we'd miss a fatal. 256 KiB is
 	// well above anything realistic.
 	scanner.Buffer(make([]byte, 64*1024), 256*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "Error:") {
+		if lineIndicatesStartupError(scanner.Text()) {
 			return true
 		}
 	}

@@ -105,8 +105,19 @@ func TestSwiftLMIsStartupError(t *testing.T) {
 		log  string
 		want bool
 	}{
+		// ArgumentParser validation / explicit error lines.
 		{"fatal Error line", "[SwiftLM] Loading model: /x\nError: File not found: main\n", true},
 		{"missing arg error", "Error: Missing expected argument '--model <model>'\n", true},
+
+		// Swift runtime aborts (OOM, forced-try, fatalError).
+		{"Fatal error prefix", "Fatal error: Unexpectedly found nil\n", true},
+		{"forced-try swift stack", "Swift/ErrorType.swift:200: Fatal error: 'try!' expression\n", true},
+		{"thread 1 fatal", "Thread 1: Fatal error: index out of range\n", true},
+
+		// dyld load failures (missing metallib / dylib).
+		{"dyld library not loaded", "dyld[12345]: Library not loaded: @rpath/libmlx.metallib\n", true},
+
+		// Negatives.
 		{"info only", "[SwiftLM] Loading model: /ok\n[SwiftLM] Ready\n", false},
 		{"empty", "", false},
 		{"lowercase error not matched", "error: something\n", false},
