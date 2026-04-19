@@ -2,7 +2,6 @@ version: "2"
 linters:
   disable:
     - errcheck
-    - unused
   enable:
     - cyclop
     - dupl

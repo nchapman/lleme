@@ -182,10 +182,6 @@ func GetQuantPriority(quant string) int {
 	return 1000
 }
 
-func IsGGUFFile(filename string) bool {
-	return strings.HasSuffix(filename, ".gguf")
-}
-
 // FormatModelName returns a display name for the model, omitting the quant suffix for "default".
 func FormatModelName(user, repo, quant string) string {
 	if quant == "" || quant == "default" {

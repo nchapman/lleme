@@ -235,9 +235,9 @@ func TestGetConfigInt(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := NewResolver(tt.persona, tt.config, tt.preset)
-			got := r.GetConfigInt(tt.key)
+			got, _ := r.GetConfigIntWithSource(tt.key)
 			if got != tt.want {
-				t.Errorf("GetConfigInt() = %v, want %v", got, tt.want)
+				t.Errorf("GetConfigIntWithSource() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -281,10 +281,48 @@ func TestGetConfigFloat(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := NewResolver(tt.persona, tt.config, tt.preset)
-			got := r.GetConfigFloat(tt.key)
+			got, _ := r.GetConfigFloatWithSource(tt.key)
 			if got != tt.want {
-				t.Errorf("GetConfigFloat() = %v, want %v", got, tt.want)
+				t.Errorf("GetConfigFloatWithSource() = %v, want %v", got, tt.want)
 			}
 		})
 	}
+}
+
+// TestWithSourceReportsCorrectLayer verifies that the *WithSource variants
+// return the layer the value actually came from, including when the value is
+// an explicit zero. This is what the /set command uses to show users where a
+// value originated.
+func TestWithSourceReportsCorrectLayer(t *testing.T) {
+	t.Run("float: persona zero beats preset and config", func(t *testing.T) {
+		r := NewResolver(
+			&config.Persona{Options: map[string]any{"min-p": 0.0}},
+			&config.Config{LlamaCpp: config.LlamaCpp{Options: map[string]any{"min-p": 0.1}}},
+			&presets.Preset{Options: map[string]any{"min-p": 0.05}},
+		)
+		v, source := r.GetConfigFloatWithSource("min-p")
+		if v != 0.0 || source != "persona" {
+			t.Errorf("got (%v, %q), want (0.0, \"persona\")", v, source)
+		}
+	})
+
+	t.Run("int: preset zero beats config", func(t *testing.T) {
+		r := NewResolver(
+			nil,
+			&config.Config{LlamaCpp: config.LlamaCpp{Options: map[string]any{"top-k": 40}}},
+			&presets.Preset{Options: map[string]any{"top-k": 0}},
+		)
+		v, source := r.GetConfigIntWithSource("top-k")
+		if v != 0 || source != "preset" {
+			t.Errorf("got (%v, %q), want (0, \"preset\")", v, source)
+		}
+	})
+
+	t.Run("missing key returns empty source", func(t *testing.T) {
+		r := NewResolver(nil, &config.Config{}, nil)
+		v, source := r.GetConfigFloatWithSource("nope")
+		if v != 0 || source != "" {
+			t.Errorf("got (%v, %q), want (0, \"\")", v, source)
+		}
+	})
 }

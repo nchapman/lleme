@@ -17,8 +17,6 @@ func TestStyleFunctions(t *testing.T) {
 		{"Muted", Muted},
 		{"Bold", Bold},
 		{"Keyword", Keyword},
-		{"Value", Value},
-		{"Box", Box},
 	}
 
 	for _, tc := range testCases {
@@ -52,8 +50,6 @@ func TestStyleFunctionsEmptyInput(t *testing.T) {
 		{"Muted", Muted},
 		{"Bold", Bold},
 		{"Keyword", Keyword},
-		{"Value", Value},
-		{"Box", Box},
 	}
 
 	for _, tc := range testCases {

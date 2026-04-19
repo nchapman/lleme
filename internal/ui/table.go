@@ -143,8 +143,3 @@ func (t *Table) Render() string {
 
 	return b.String()
 }
-
-// String implements the Stringer interface.
-func (t *Table) String() string {
-	return t.Render()
-}

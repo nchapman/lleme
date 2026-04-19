@@ -1,5 +1,16 @@
 package proxy
 
+// Lock ordering (MUST be preserved):
+//
+//   ModelManager.mu  →  Backend.mu
+//
+// Any code that holds Backend.mu MUST NOT acquire ModelManager.mu. Reverse
+// order would deadlock with GetIdleBackends, getLRUModel, GetOrLoadBackend,
+// and StopBackend, all of which hold m.mu while calling Backend methods that
+// take b.mu (InFlight, IdleDuration, GetStatus, SetStatus, AcquireRequest,
+// etc.). When a function releases m.mu (e.g., shutdownBackend waiting on the
+// process), it must not re-acquire it while holding b.mu.
+
 import (
 	"bufio"
 	"fmt"
@@ -52,6 +63,10 @@ func (m *ModelManager) SetStateChangeCallback(fn func()) {
 
 // GetOrLoadBackend returns a backend for the given model, loading it if necessary.
 // Options override config defaults for this specific load (ctx-size, gpu-layers, etc.).
+//
+// On success, the returned backend has been reserved via AcquireRequest under m.mu,
+// so idle-eviction and LRU-eviction cannot tear it down while the caller uses it.
+// Callers MUST call backend.ReleaseRequest() when done (typically via defer).
 func (m *ModelManager) GetOrLoadBackend(modelQuery string, options map[string]any) (*Backend, error) { //nolint:gocognit,cyclop // TODO: refactor after adding integration tests for locking behavior
 	// First, resolve the model name
 	result, err := m.resolver.Resolve(modelQuery)
@@ -107,29 +122,23 @@ func (m *ModelManager) GetOrLoadBackend(modelQuery string, options map[string]an
 				m.mu.Lock()
 				// Fall through to create new backend with new options
 			} else {
-				// Same options - update LRU and return existing backend
+				// Same options - update LRU, reserve for this request, and return.
+				// AcquireRequest runs while we still hold m.mu so any concurrent
+				// getLRUModel or GetIdleBackends sees inFlight > 0 immediately.
 				m.updateLRU(modelName)
-				backend.UpdateActivity()
+				backend.AcquireRequest()
 				m.mu.Unlock()
 				return backend, nil
 			}
 		case BackendStarting:
-			// Currently starting - wait for it
+			// Currently starting - wait for it, then reserve under m.mu.
 			readyChan := backend.ReadyChan
 			m.mu.Unlock()
 			<-readyChan
-			if backend.GetStatus() == BackendReady {
-				// Check options after it's ready
-				if optionsChanged(backend.Options, options) {
-					// Need to reload with different options
-					m.StopBackend(modelName)
-					// Recursively call to load with new options
-					return m.GetOrLoadBackend(modelQuery, options)
-				}
-				backend.UpdateActivity()
-				return backend, nil
+			if backend.GetStatus() != BackendReady {
+				return nil, fmt.Errorf("backend failed to start")
 			}
-			return nil, fmt.Errorf("backend failed to start")
+			return m.finalizeReadyBackend(modelQuery, modelName, backend, options)
 		}
 	}
 
@@ -139,7 +148,7 @@ func (m *ModelManager) GetOrLoadBackend(modelQuery string, options map[string]an
 		lruModel := m.getLRUModel()
 		if lruModel == "" {
 			m.mu.Unlock()
-			return nil, fmt.Errorf("failed to evict model: no models to evict")
+			return nil, fmt.Errorf("cannot load %s: all %d model slots busy with in-flight requests", modelName, m.config.MaxModels)
 		}
 		// Mark as stopping to prevent concurrent eviction race
 		if lruBackend := m.backends[lruModel]; lruBackend != nil {
@@ -187,14 +196,39 @@ func (m *ModelManager) GetOrLoadBackend(modelQuery string, options map[string]an
 	// Wait for ready
 	select {
 	case <-backend.ReadyChan:
-		if backend.GetStatus() == BackendReady {
-			return backend, nil
+		if backend.GetStatus() != BackendReady {
+			return nil, fmt.Errorf("backend failed to start")
 		}
-		return nil, fmt.Errorf("backend failed to start")
+		return m.finalizeReadyBackend(modelQuery, modelName, backend, options)
 	case <-time.After(m.config.StartupTimeout):
 		m.StopBackend(modelName)
 		return nil, fmt.Errorf("backend startup timeout after %v", m.config.StartupTimeout)
 	}
+}
+
+// finalizeReadyBackend atomically verifies a ready backend is still the one
+// registered under modelName, updates LRU, and reserves it for the caller's
+// request. Returns a fresh GetOrLoadBackend call if options changed or the
+// backend was replaced/evicted between startup and finalization.
+func (m *ModelManager) finalizeReadyBackend(modelQuery, modelName string, backend *Backend, options map[string]any) (*Backend, error) {
+	m.mu.Lock()
+	current, ok := m.backends[modelName]
+	if !ok || current != backend {
+		// Evicted or replaced during handoff; retry from scratch.
+		m.mu.Unlock()
+		return m.GetOrLoadBackend(modelQuery, options)
+	}
+	if optionsChanged(backend.Options, options) {
+		m.mu.Unlock()
+		if err := m.StopBackend(modelName); err != nil {
+			return nil, fmt.Errorf("reload with new options: %w", err)
+		}
+		return m.GetOrLoadBackend(modelQuery, options)
+	}
+	m.updateLRU(modelName)
+	backend.AcquireRequest()
+	m.mu.Unlock()
+	return backend, nil
 }
 
 // GetBackend returns a backend if it exists and is ready
@@ -221,15 +255,11 @@ func (m *ModelManager) ListBackends() []BackendInfo {
 
 	var infos []BackendInfo
 	for _, backend := range m.backends {
-		pid := 0
-		if backend.Process != nil {
-			pid = backend.Process.Pid
-		}
 		infos = append(infos, BackendInfo{
 			ModelName:    backend.ModelName,
 			Status:       backend.GetStatus().String(),
 			Port:         backend.Port,
-			PID:          pid,
+			PID:          backend.PID(),
 			StartedAt:    backend.StartedAt,
 			LastActivity: backend.GetLastActivity(),
 			IdleMinutes:  backend.IdleDuration().Minutes(),
@@ -238,7 +268,31 @@ func (m *ModelManager) ListBackends() []BackendInfo {
 	return infos
 }
 
-// StopBackend stops a specific backend
+// ErrBackendBusy is returned by StopIfIdle when the backend has in-flight requests.
+var ErrBackendBusy = fmt.Errorf("backend busy with in-flight requests")
+
+// StopIfIdle stops a backend only if it has no in-flight requests. Returns
+// ErrBackendBusy otherwise. Used by the idle monitor to avoid tearing down
+// a backend that a request acquired between the snapshot and the stop.
+func (m *ModelManager) StopIfIdle(modelName string) error {
+	m.mu.Lock()
+	backend, exists := m.backends[modelName]
+	if !exists {
+		m.mu.Unlock()
+		return fmt.Errorf("backend not found: %s", modelName)
+	}
+	if backend.InFlight() > 0 {
+		m.mu.Unlock()
+		return ErrBackendBusy
+	}
+	backend.SetStatus(BackendStopping)
+	m.mu.Unlock()
+
+	return m.shutdownBackend(modelName, backend)
+}
+
+// StopBackend stops a specific backend unconditionally. Callers that must not
+// kill an in-flight request (e.g., the idle monitor) should use StopIfIdle.
 func (m *ModelManager) StopBackend(modelName string) error {
 	m.mu.Lock()
 	backend, exists := m.backends[modelName]
@@ -250,14 +304,21 @@ func (m *ModelManager) StopBackend(modelName string) error {
 	backend.SetStatus(BackendStopping)
 	m.mu.Unlock()
 
-	// Graceful shutdown
-	if backend.Process != nil {
-		backend.Process.Signal(syscall.SIGTERM)
+	return m.shutdownBackend(modelName, backend)
+}
+
+// shutdownBackend performs graceful shutdown after a backend has been marked
+// BackendStopping. Must be called without m.mu held.
+func (m *ModelManager) shutdownBackend(modelName string, backend *Backend) error {
+	// Graceful shutdown. Snapshot the process pointer under b.mu; after the
+	// snapshot the os.Process methods are safe to call without holding the lock.
+	if proc := backend.GetProcess(); proc != nil {
+		proc.Signal(syscall.SIGTERM)
 
 		// Wait for graceful exit (up to 5 seconds)
 		done := make(chan struct{})
 		go func() {
-			backend.Process.Wait()
+			proc.Wait()
 			close(done)
 		}()
 
@@ -266,8 +327,8 @@ func (m *ModelManager) StopBackend(modelName string) error {
 			// Process exited gracefully
 		case <-time.After(5 * time.Second):
 			// Force kill
-			backend.Process.Kill()
-			backend.Process.Wait()
+			proc.Kill()
+			proc.Wait()
 		}
 	}
 
@@ -318,14 +379,21 @@ func (m *ModelManager) LoadedCount() int {
 	return len(m.backends)
 }
 
-// GetIdleBackends returns backends that have been idle longer than the timeout
+// GetIdleBackends returns backends that have been idle longer than the timeout.
+// Backends with in-flight requests are skipped regardless of idle duration.
 func (m *ModelManager) GetIdleBackends(timeout time.Duration) []*Backend {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	var idle []*Backend
 	for _, backend := range m.backends {
-		if backend.GetStatus() == BackendReady && backend.IdleDuration() > timeout {
+		if backend.GetStatus() != BackendReady {
+			continue
+		}
+		if backend.InFlight() > 0 {
+			continue
+		}
+		if backend.IdleDuration() > timeout {
 			idle = append(idle, backend)
 		}
 	}
@@ -370,7 +438,7 @@ func (m *ModelManager) startBackend(backend *Backend) {
 		return
 	}
 
-	backend.Process = cmd.Process
+	backend.SetProcess(cmd.Process)
 
 	// Wait for server to be ready
 	if err := m.waitForReady(backend); err != nil {
@@ -545,13 +613,22 @@ func (m *ModelManager) removeLRU(modelName string) {
 	}
 }
 
-// getLRUModel returns the least recently used model name.
+// getLRUModel returns the least recently used model name that is eligible for eviction.
+// Backends with in-flight requests are skipped. Returns "" if no candidate is eligible.
 // Caller must hold m.mu.
 func (m *ModelManager) getLRUModel() string {
-	if len(m.lruOrder) == 0 {
-		return ""
+	for i := len(m.lruOrder) - 1; i >= 0; i-- {
+		name := m.lruOrder[i]
+		backend, ok := m.backends[name]
+		if !ok {
+			continue
+		}
+		if backend.InFlight() > 0 {
+			continue
+		}
+		return name
 	}
-	return m.lruOrder[len(m.lruOrder)-1]
+	return ""
 }
 
 // AmbiguousModelError is returned when a query matches multiple models

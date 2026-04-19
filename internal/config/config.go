@@ -245,32 +245,6 @@ func (c *LlamaCpp) GetOption(key string) (any, bool) {
 	return val, ok
 }
 
-// GetIntOption returns an int option, with a default if not set.
-func (c *LlamaCpp) GetIntOption(key string, defaultVal int) int {
-	if val, ok := c.GetOption(key); ok {
-		switch v := val.(type) {
-		case int:
-			return v
-		case float64:
-			return int(v)
-		}
-	}
-	return defaultVal
-}
-
-// GetFloatOption returns a float option, with a default if not set.
-func (c *LlamaCpp) GetFloatOption(key string, defaultVal float64) float64 {
-	if val, ok := c.GetOption(key); ok {
-		switch v := val.(type) {
-		case float64:
-			return v
-		case int:
-			return float64(v)
-		}
-	}
-	return defaultVal
-}
-
 func EnsureDirectories() error {
 	dirs := []string{
 		ConfigPath(),

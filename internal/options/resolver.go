@@ -29,7 +29,8 @@ func (r *Resolver) ResolveFloat(sessionVal float64, key string) float64 {
 		logs.Debug("Resolved option", "key", key, "value", sessionVal, "source", "session")
 		return sessionVal
 	}
-	return r.GetConfigFloat(key)
+	v, _ := r.GetConfigFloatWithSource(key)
+	return v
 }
 
 // ResolveInt returns the first set value from: sessionVal, persona, preset, config.
@@ -39,18 +40,7 @@ func (r *Resolver) ResolveInt(sessionVal int, key string) int {
 		logs.Debug("Resolved option", "key", key, "value", sessionVal, "source", "session")
 		return sessionVal
 	}
-	return r.GetConfigInt(key)
-}
-
-// GetConfigInt returns the first set value from: persona, preset, config.
-func (r *Resolver) GetConfigInt(key string) int {
 	v, _ := r.GetConfigIntWithSource(key)
-	return v
-}
-
-// GetConfigFloat returns the first set value from: persona, preset, config.
-func (r *Resolver) GetConfigFloat(key string) float64 {
-	v, _ := r.GetConfigFloatWithSource(key)
 	return v
 }
 

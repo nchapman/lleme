@@ -25,6 +25,55 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+// knownSamplingKeys is the set of llama-server sampling options a preset is
+// allowed to set. Any other key indicates either a typo or a runtime/hardware
+// option that doesn't belong in a preset (those go in the user's config).
+var knownSamplingKeys = map[string]bool{
+	"temp":               true,
+	"temperature":        true,
+	"top-p":              true,
+	"top-k":              true,
+	"min-p":              true,
+	"repeat-penalty":     true,
+	"presence-penalty":   true,
+	"frequency-penalty":  true,
+	"typical":            true,
+	"typical-p":          true,
+	"repeat-last-n":      true,
+	"mirostat":           true,
+	"mirostat-lr":        true,
+	"mirostat-ent":       true,
+	"dry-multiplier":     true,
+	"dry-base":           true,
+	"dry-allowed-length": true,
+	"dry-penalty-last-n": true,
+	"xtc-probability":    true,
+	"xtc-threshold":      true,
+	"top-n-sigma":        true,
+}
+
+// TestPresetOptionsAreSamplingKeys ensures every preset sets at least one
+// sampling option and only uses known sampling keys — no runtime/hardware
+// knobs (ctx-size, gpu-layers, threads, etc.) leaking into family defaults.
+func TestPresetOptionsAreSamplingKeys(t *testing.T) {
+	ps, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	for _, p := range ps {
+		if len(p.Options) == 0 {
+			t.Errorf("preset %q has no options — presets exist to set sampling defaults", p.filename)
+			continue
+		}
+		for key := range p.Options {
+			if !knownSamplingKeys[key] {
+				t.Errorf("preset %q uses unknown or non-sampling key %q — presets should only set sampling params", p.filename, key)
+			}
+		}
+	}
+}
+
 func TestLoadSorted(t *testing.T) {
 	presets, err := Load()
 	if err != nil {
@@ -340,41 +389,6 @@ func TestRepoName(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("repoName(%q) = %q, want %q", tt.input, got, tt.want)
 		}
-	}
-}
-
-func TestGetFloatOption(t *testing.T) {
-	p := &Preset{Options: map[string]any{"temp": 0.7, "top-k": 20}}
-
-	if v := p.GetFloatOption("temp", 0); v != 0.7 {
-		t.Errorf("got %v, want 0.7", v)
-	}
-	if v := p.GetFloatOption("missing", 1.0); v != 1.0 {
-		t.Errorf("got %v, want 1.0 (default)", v)
-	}
-	// int value coerced to float
-	if v := p.GetFloatOption("top-k", 0); v != 20.0 {
-		t.Errorf("got %v, want 20.0", v)
-	}
-
-	var nilPreset *Preset
-	if v := nilPreset.GetFloatOption("temp", 0.5); v != 0.5 {
-		t.Errorf("nil preset: got %v, want 0.5", v)
-	}
-}
-
-func TestGetIntOption(t *testing.T) {
-	p := &Preset{Options: map[string]any{"top-k": 20, "temp": 0.7}}
-
-	if v := p.GetIntOption("top-k", 0); v != 20 {
-		t.Errorf("got %v, want 20", v)
-	}
-	if v := p.GetIntOption("missing", 40); v != 40 {
-		t.Errorf("got %v, want 40 (default)", v)
-	}
-	// float64 value coerced to int
-	if v := p.GetIntOption("temp", 0); v != 0 {
-		t.Errorf("got %v, want 0 (truncated float)", v)
 	}
 }
 

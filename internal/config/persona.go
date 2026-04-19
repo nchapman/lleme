@@ -16,38 +16,6 @@ type Persona struct {
 	Options map[string]any `yaml:"options,omitempty"`
 }
 
-// GetFloatOption returns a float option from the persona, with a default if not set.
-func (p *Persona) GetFloatOption(key string, defaultVal float64) float64 {
-	if p == nil || p.Options == nil {
-		return defaultVal
-	}
-	if val, ok := p.Options[key]; ok {
-		switch v := val.(type) {
-		case float64:
-			return v
-		case int:
-			return float64(v)
-		}
-	}
-	return defaultVal
-}
-
-// GetIntOption returns an int option from the persona, with a default if not set.
-func (p *Persona) GetIntOption(key string, defaultVal int) int {
-	if p == nil || p.Options == nil {
-		return defaultVal
-	}
-	if val, ok := p.Options[key]; ok {
-		switch v := val.(type) {
-		case int:
-			return v
-		case float64:
-			return int(v)
-		}
-	}
-	return defaultVal
-}
-
 // GetServerOptions returns all persona options to pass to the model loading API.
 // Returns a shallow copy to prevent callers from mutating persona state.
 func (p *Persona) GetServerOptions() map[string]any {
@@ -107,25 +75,6 @@ func LoadPersona(name string) (*Persona, error) {
 	}
 
 	return &persona, nil
-}
-
-// SavePersona saves a persona to disk.
-func SavePersona(name string, persona *Persona) error {
-	if err := os.MkdirAll(PersonasPath(), 0755); err != nil {
-		return fmt.Errorf("failed to create personas directory: %w", err)
-	}
-
-	data, err := yaml.Marshal(persona)
-	if err != nil {
-		return fmt.Errorf("failed to marshal persona: %w", err)
-	}
-
-	path := PersonaPath(name)
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("failed to write persona: %w", err)
-	}
-
-	return nil
 }
 
 // SavePersonaTemplate saves a persona with helpful comments.

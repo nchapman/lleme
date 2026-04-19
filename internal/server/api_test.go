@@ -11,20 +11,6 @@ import (
 	"testing"
 )
 
-func TestNewAPIClient(t *testing.T) {
-	api := NewAPIClient("127.0.0.1", 11313)
-	if api == nil {
-		t.Fatal("Expected non-nil APIClient")
-	}
-	expectedURL := "http://127.0.0.1:11313"
-	if api.baseURL != expectedURL {
-		t.Errorf("Expected baseURL %s, got %s", expectedURL, api.baseURL)
-	}
-	if api.client == nil {
-		t.Error("Expected non-nil HTTP client")
-	}
-}
-
 func TestNewAPIClientFromURL(t *testing.T) {
 	t.Run("creates client with provided URL", func(t *testing.T) {
 		api := NewAPIClientFromURL("http://localhost:9000")

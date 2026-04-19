@@ -2,6 +2,7 @@ package presets
 
 import (
 	"embed"
+	"fmt"
 	"io/fs"
 )
 
@@ -9,10 +10,12 @@ import (
 var content embed.FS
 
 // PresetsFS returns the embedded preset data directory as an fs.FS.
-func PresetsFS() fs.FS {
+// Returns an error only if the embed.FS is misconfigured at build time; callers
+// can safely propagate the error rather than crashing the program.
+func PresetsFS() (fs.FS, error) {
 	fsys, err := fs.Sub(content, "data")
 	if err != nil {
-		panic("presets: embedded data directory missing: " + err.Error())
+		return nil, fmt.Errorf("presets: embedded data directory missing: %w", err)
 	}
-	return fsys
+	return fsys, nil
 }

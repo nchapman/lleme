@@ -52,20 +52,6 @@ func (p *PortAllocator) Release(port int) {
 	delete(p.inUse, port)
 }
 
-// IsAllocated checks if a port is currently allocated
-func (p *PortAllocator) IsAllocated(port int) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.inUse[port]
-}
-
-// AllocatedCount returns the number of currently allocated ports
-func (p *PortAllocator) AllocatedCount() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.inUse)
-}
-
 // isPortAvailable checks if a port is available for binding
 func isPortAvailable(port int) bool {
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))

@@ -1,11 +1,11 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/logs"
+	"github.com/nchapman/lleme/internal/ui"
 	"github.com/nchapman/lleme/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -23,8 +23,7 @@ caching, and running inference.`,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		logs.InitLogger(nil, verbose)
 		if err := config.EnsureDirectories(); err != nil {
-			fmt.Printf("Error: Failed to create directories: %v\n", err)
-			os.Exit(1)
+			ui.Fatal("Failed to create directories: %v", err)
 		}
 	},
 }

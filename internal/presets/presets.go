@@ -21,40 +21,6 @@ type Preset struct {
 	filename string // set by Load, used for deterministic sort
 }
 
-// GetFloatOption returns a float option from the preset, 0 if absent.
-func (p *Preset) GetFloatOption(key string, defaultVal float64) float64 {
-	if p == nil || p.Options == nil {
-		return defaultVal
-	}
-	if val, ok := p.Options[key]; ok {
-		switch v := val.(type) {
-		case float64:
-			return v
-		case int:
-			return float64(v)
-		}
-	}
-	return defaultVal
-}
-
-// GetIntOption returns an int option from the preset, defaultVal if absent.
-func (p *Preset) GetIntOption(key string, defaultVal int) int {
-	if p == nil || p.Options == nil {
-		return defaultVal
-	}
-	if val, ok := p.Options[key]; ok {
-		switch v := val.(type) {
-		case int:
-			return v
-		case int64:
-			return int(v)
-		case float64:
-			return int(v)
-		}
-	}
-	return defaultVal
-}
-
 // GetOptions returns a shallow copy of the preset's options map.
 func (p *Preset) GetOptions() map[string]any {
 	if p == nil || len(p.Options) == 0 {
@@ -69,7 +35,10 @@ func (p *Preset) GetOptions() map[string]any {
 
 // Load parses all embedded *.yaml preset files, sorted alphabetically by filename.
 func Load() ([]*Preset, error) {
-	fsys := PresetsFS()
+	fsys, err := PresetsFS()
+	if err != nil {
+		return nil, err
+	}
 
 	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {

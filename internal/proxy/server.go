@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -22,9 +23,12 @@ import (
 	"github.com/nchapman/lleme/internal/version"
 )
 
+// maxRequestBodyBytes caps inbound chat/messages request bodies to protect against
+// unbounded memory use. 10 MiB is far larger than any reasonable prompt + history.
+const maxRequestBodyBytes = 10 * 1024 * 1024
+
 // Server is the main proxy server that routes requests to backends
 type Server struct {
-	mu           sync.RWMutex
 	httpServer   *http.Server
 	manager      *ModelManager
 	idleMonitor  *IdleMonitor
@@ -125,11 +129,6 @@ func (s *Server) Stop() error {
 	return s.httpServer.Shutdown(ctx)
 }
 
-// Manager returns the model manager
-func (s *Server) Manager() *ModelManager {
-	return s.manager
-}
-
 // saveState persists the current proxy and backend state to disk
 func (s *Server) saveState() {
 	s.stateMu.Lock()
@@ -159,11 +158,6 @@ func (s *Server) saveState() {
 	if err := SaveProxyState(state); err != nil {
 		logs.Warn("Failed to persist proxy state", "error", err)
 	}
-}
-
-// Addr returns the address the server is listening on
-func (s *Server) Addr() string {
-	return s.httpServer.Addr
 }
 
 // handleChatCompletions proxies chat completion requests to the appropriate backend
@@ -198,9 +192,16 @@ func (s *Server) proxyToBackend(w http.ResponseWriter, r *http.Request, path str
 		return
 	}
 
-	// Read and parse body to get model
+	// Cap inbound body to prevent unbounded memory use.
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			s.writeError(w, http.StatusRequestEntityTooLarge, "invalid_request",
+				fmt.Sprintf("Request body exceeds %d bytes", maxRequestBodyBytes))
+			return
+		}
 		s.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to read request body")
 		return
 	}
@@ -219,15 +220,14 @@ func (s *Server) proxyToBackend(w http.ResponseWriter, r *http.Request, path str
 		return
 	}
 
-	// Get or load the backend (no options override for chat endpoint)
+	// Get or load the backend (no options override for chat endpoint).
+	// GetOrLoadBackend reserves the backend via AcquireRequest; we release on return.
 	backend, err := s.manager.GetOrLoadBackend(req.Model, nil)
 	if err != nil {
 		s.handleModelError(w, err)
 		return
 	}
-
-	// Update activity
-	backend.UpdateActivity()
+	defer backend.ReleaseRequest()
 
 	// Proxy the request
 	backendURL := fmt.Sprintf("http://%s:%d", s.config.Host, backend.Port)
@@ -261,9 +261,16 @@ func (s *Server) proxyToBackendAnthropic(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Read and parse body to get model
+	// Cap inbound body to prevent unbounded memory use.
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			s.writeAnthropicError(w, requestID, http.StatusRequestEntityTooLarge, AnthropicInvalidRequest,
+				fmt.Sprintf("Request body exceeds %d bytes", maxRequestBodyBytes))
+			return
+		}
 		s.writeAnthropicError(w, requestID, http.StatusBadRequest, AnthropicInvalidRequest, "Failed to read request body")
 		return
 	}
@@ -282,15 +289,14 @@ func (s *Server) proxyToBackendAnthropic(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Get or load the backend
+	// Get or load the backend.
+	// GetOrLoadBackend reserves the backend via AcquireRequest; we release on return.
 	backend, err := s.manager.GetOrLoadBackend(req.Model, nil)
 	if err != nil {
 		s.handleAnthropicModelError(w, requestID, err)
 		return
 	}
-
-	// Update activity
-	backend.UpdateActivity()
+	defer backend.ReleaseRequest()
 
 	// Proxy the request
 	backendURL := fmt.Sprintf("http://%s:%d", s.config.Host, backend.Port)
@@ -485,6 +491,24 @@ func (s *Server) writeError(w http.ResponseWriter, status int, errType, message 
 	})
 }
 
+// decodeJSONBody reads r.Body under the shared size cap and decodes it into v.
+// Returns a formatted OpenAI-style error response on failure and false; callers
+// can simply `return` when false is returned.
+func (s *Server) decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			s.writeError(w, http.StatusRequestEntityTooLarge, "invalid_request",
+				fmt.Sprintf("Request body exceeds %d bytes", maxRequestBodyBytes))
+			return false
+		}
+		s.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request body")
+		return false
+	}
+	return true
+}
+
 // handleRun loads a model with optional server options
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -493,8 +517,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req RunRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request body")
+	if !s.decodeJSONBody(w, r, &req) {
 		return
 	}
 
@@ -522,12 +545,15 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		options["threads"] = *req.Threads
 	}
 
-	// Load the backend with options
+	// Load the backend with options.
+	// GetOrLoadBackend reserves the backend; release it immediately since this
+	// endpoint only reports status and does not proxy a request.
 	backend, err := s.manager.GetOrLoadBackend(req.Model, options)
 	if err != nil {
 		s.handleModelError(w, err)
 		return
 	}
+	defer backend.ReleaseRequest()
 
 	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, RunResponse{
@@ -548,8 +574,7 @@ func (s *Server) handleStopModel(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Model string `json:"model"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request body")
+	if !s.decodeJSONBody(w, r, &req) {
 		return
 	}
 
@@ -597,6 +622,10 @@ func (s *Server) handleStopAll(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only POST is allowed")
 		return
 	}
+
+	// Cap any incoming body even though we ignore it, to prevent a large POST
+	// from buffering into memory.
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 
 	count := s.manager.LoadedCount()
 	if err := s.manager.StopAllBackends(); err != nil {

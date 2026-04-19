@@ -72,21 +72,6 @@ func TestGetBinaryPattern(t *testing.T) {
 	}
 }
 
-func TestBinaryPath(t *testing.T) {
-	tmpDir := t.TempDir()
-	oldHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", oldHome)
-
-	os.Setenv("HOME", tmpDir)
-
-	expectedPath := filepath.Join(tmpDir, ".lleme", "bin", "llama-current", "llama-cli")
-	actualPath := BinaryPath()
-
-	if actualPath != expectedPath {
-		t.Errorf("Expected BinaryPath %s, got %s", expectedPath, actualPath)
-	}
-}
-
 func TestServerPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	oldHome := os.Getenv("HOME")

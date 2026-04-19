@@ -158,20 +158,24 @@ func (w *RotatingWriter) Close() error {
 // rotateUnlocked performs rotation without holding the lock.
 // Caller must hold w.mu.
 func (w *RotatingWriter) rotateUnlocked() error {
-	// Close current file
+	// Close current file; a failure here is non-fatal (we still want to rotate
+	// and reopen), but the error is worth logging to stderr so debugging isn't
+	// silent.
 	if w.file != nil {
-		w.file.Close()
+		if err := w.file.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "logs: failed to close %s during rotation: %v\n", w.basePath, err)
+		}
 	}
 
 	// Rotate files
 	if err := rotateLogs(w.basePath); err != nil {
-		return err
+		return fmt.Errorf("rotate logs for %s: %w", w.basePath, err)
 	}
 
 	// Open a fresh log file
 	file, err := os.OpenFile(w.basePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
-		return err
+		return fmt.Errorf("open %s: %w", w.basePath, err)
 	}
 
 	w.file = file

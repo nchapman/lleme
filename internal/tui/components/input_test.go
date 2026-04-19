@@ -7,7 +7,7 @@ import (
 )
 
 func TestInput_Basic(t *testing.T) {
-	input := NewInput()
+	input := NewInputWithCompletions(nil, nil)
 
 	// Initially focused
 	if !input.IsFocused() {
@@ -36,7 +36,7 @@ func TestInput_Basic(t *testing.T) {
 }
 
 func TestInput_FocusBlur(t *testing.T) {
-	input := NewInput()
+	input := NewInputWithCompletions(nil, nil)
 
 	input.Blur()
 	if input.IsFocused() {
@@ -50,7 +50,7 @@ func TestInput_FocusBlur(t *testing.T) {
 }
 
 func TestInput_ValueTrimmed(t *testing.T) {
-	input := NewInput()
+	input := NewInputWithCompletions(nil, nil)
 
 	input.SetValue("  hello world  ")
 	if input.Value() != "hello world" {
@@ -141,7 +141,7 @@ func TestInput_SetOptionCompletions(t *testing.T) {
 }
 
 func TestInput_IsSetOptionContext(t *testing.T) {
-	input := NewInput()
+	input := NewInputWithCompletions(nil, nil)
 
 	tests := []struct {
 		value    string
@@ -169,7 +169,7 @@ func TestInput_IsSetOptionContext(t *testing.T) {
 }
 
 func TestInput_Height(t *testing.T) {
-	input := NewInput()
+	input := NewInputWithCompletions(nil, nil)
 
 	// Default height is minHeight (1)
 	if input.Height() != 1 {
@@ -178,7 +178,7 @@ func TestInput_Height(t *testing.T) {
 }
 
 func TestInput_SetWidth(t *testing.T) {
-	input := NewInput()
+	input := NewInputWithCompletions(nil, nil)
 	input.SetWidth(80)
 	// Just verify it doesn't panic - width is internal state
 }
@@ -198,7 +198,7 @@ func TestInput_NoCompletionsWithoutSlash(t *testing.T) {
 }
 
 func TestInput_CompletionsViewEmpty(t *testing.T) {
-	input := NewInput()
+	input := NewInputWithCompletions(nil, nil)
 
 	// Without completions set up, should return empty
 	view := input.CompletionsView()

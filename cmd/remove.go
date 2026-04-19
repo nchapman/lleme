@@ -68,7 +68,8 @@ Examples:
 			fmt.Println("  lleme remove user/repo:quant")
 			fmt.Println("  lleme remove --older-than 30d")
 			fmt.Println("  lleme remove --larger-than 10GB")
-			os.Exit(1)
+			ui.ExitFunc(1)
+			return
 		}
 
 		// Parse filters
@@ -221,7 +222,7 @@ type modelWalker struct {
 
 func (w *modelWalker) walk(path string, d fs.DirEntry, err error) error {
 	if err != nil {
-		return err
+		return fmt.Errorf("walk %s: %w", path, err)
 	}
 	if d.IsDir() || filepath.Ext(d.Name()) != ".gguf" {
 		return nil
@@ -229,7 +230,7 @@ func (w *modelWalker) walk(path string, d fs.DirEntry, err error) error {
 
 	relPath, err := filepath.Rel(w.modelsDir, path)
 	if err != nil {
-		return err
+		return fmt.Errorf("relative path of %s: %w", path, err)
 	}
 
 	parts := strings.Split(relPath, string(filepath.Separator))
@@ -241,7 +242,7 @@ func (w *modelWalker) walk(path string, d fs.DirEntry, err error) error {
 
 	quant, size, skip, err := classifyModelEntry(user, repo, parts, path, d, w.seen)
 	if err != nil {
-		return err
+		return fmt.Errorf("classify %s: %w", relPath, err)
 	}
 	if skip {
 		return nil

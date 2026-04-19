@@ -31,11 +31,6 @@ type Input struct {
 	setOptionItems []Completion // Available /set option completions
 }
 
-// NewInput creates a new input component
-func NewInput() Input {
-	return NewInputWithCompletions(nil, nil)
-}
-
 // NewInputWithCompletions creates a new input component with command completions
 func NewInputWithCompletions(cmdItems, setOptionItems []Completion) Input {
 	ta := textarea.New()

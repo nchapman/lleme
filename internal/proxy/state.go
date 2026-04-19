@@ -119,15 +119,6 @@ func isProcessRunning(pid int) bool {
 	return process.Signal(syscall.Signal(0)) == nil
 }
 
-// GetProxyURL returns the URL of the running proxy, or empty if not running
-func GetProxyURL() string {
-	state := GetRunningProxyState()
-	if state == nil {
-		return ""
-	}
-	return fmt.Sprintf("http://%s:%d", state.Host, state.Port)
-}
-
 // CleanupOrphanedBackends kills any orphaned llama-server processes from a previous
 // proxy instance that crashed. Returns the number of processes killed.
 func CleanupOrphanedBackends() int {

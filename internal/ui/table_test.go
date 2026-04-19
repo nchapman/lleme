@@ -137,17 +137,6 @@ func TestTableRender(t *testing.T) {
 	})
 }
 
-func TestTableString(t *testing.T) {
-	tbl := NewTable().
-		AddColumn("Test", 10, AlignLeft).
-		AddRow("data")
-
-	// String() should return same as Render()
-	if tbl.String() != tbl.Render() {
-		t.Error("Expected String() to return same as Render()")
-	}
-}
-
 func TestAlignment(t *testing.T) {
 	if AlignLeft != 0 {
 		t.Errorf("Expected AlignLeft to be 0, got %d", AlignLeft)

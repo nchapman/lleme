@@ -34,12 +34,6 @@ type Downloader struct {
 	lastBytes  int64
 }
 
-func NewDownloader(client *Client) *Downloader {
-	return &Downloader{
-		client: client,
-	}
-}
-
 func NewDownloaderWithProgress(client *Client, progress ProgressCallback) *Downloader {
 	return &Downloader{
 		client:   client,
@@ -151,10 +145,6 @@ func (d *Downloader) calculateProgress(downloaded, total int64) *DownloadProgres
 	}
 }
 
-func CalculateSHA256(filePath string) (string, error) {
-	return CalculateSHA256WithProgress(filePath, nil)
-}
-
 // CalculateSHA256WithProgress computes sha256 hash with optional progress callback.
 // The callback receives bytes processed and total size.
 func CalculateSHA256WithProgress(filePath string, progress func(processed, total int64)) (string, error) {
@@ -192,15 +182,6 @@ func CalculateSHA256WithProgress(filePath string, progress func(processed, total
 	}
 
 	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-func VerifySHA256(filePath, expectedHash string) (bool, error) {
-	actualHash, err := CalculateSHA256(filePath)
-	if err != nil {
-		return false, err
-	}
-
-	return strings.EqualFold(actualHash, expectedHash), nil
 }
 
 func GetModelPath(user, repo string) string {

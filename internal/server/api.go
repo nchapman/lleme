@@ -96,20 +96,17 @@ type HealthResponse struct {
 	Status string `json:"status"`
 }
 
+// maxErrorBodyBytes caps the error-response body we read so a pathological
+// backend reply doesn't blow up memory. Error bodies are small in practice.
+const maxErrorBodyBytes = 64 * 1024
+
 // checkResponse reads the response body and returns an error if status is not OK.
 func checkResponse(resp *http.Response, operation string) error {
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		return fmt.Errorf("%s: HTTP %d: %s", operation, resp.StatusCode, string(body))
 	}
 	return nil
-}
-
-func NewAPIClient(host string, port int) *APIClient {
-	return &APIClient{
-		baseURL: fmt.Sprintf("http://%s:%d", host, port),
-		client:  &http.Client{},
-	}
 }
 
 func NewAPIClientFromURL(baseURL string) *APIClient {

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/nchapman/lleme/internal/config"
-	"github.com/nchapman/lleme/internal/fileutil"
+	"github.com/nchapman/lleme/internal/logs"
 	"github.com/nchapman/lleme/internal/version"
 )
 
@@ -242,27 +242,6 @@ func (c *Client) ListFilesInPath(user, repo, branch, path string) ([]FileTree, e
 	return files, nil
 }
 
-// GetFileSize returns the size of a file in a repository using a HEAD request.
-func (c *Client) GetFileSize(user, repo, branch, filename string) (int64, error) {
-	url := fmt.Sprintf("%s/%s/%s/resolve/%s/%s", baseURL, user, repo, branch, filename)
-	req, err := http.NewRequest("HEAD", url, nil)
-	if err != nil {
-		return 0, err
-	}
-
-	resp, err := c.doRequest(req)
-	if err != nil {
-		return 0, err
-	}
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-
-	return resp.ContentLength, nil
-}
-
 func (c *Client) SearchModels(query string, limit int) ([]SearchResult, error) {
 	// Use models-json endpoint with apps=llama.cpp filter for llama.cpp compatible models
 	searchURL := fmt.Sprintf("%s/models-json?apps=llama.cpp&sort=trending", baseURL)
@@ -297,42 +276,6 @@ func (c *Client) SearchModels(query string, limit int) ([]SearchResult, error) {
 	}
 
 	return results, nil
-}
-
-func (c *Client) DownloadFile(user, repo, branch, filename string, progress func(int64, int64)) (string, error) {
-	fileURL := fmt.Sprintf("%s/%s/%s/resolve/%s/%s", baseURL, user, repo, branch, filename)
-	req, err := http.NewRequest("GET", fileURL, nil)
-	if err != nil {
-		return "", err
-	}
-
-	resp, err := c.doRequest(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-
-	tmpPath := filepath.Join(config.BinPath(), filename+".partial")
-	out, err := os.Create(tmpPath)
-	if err != nil {
-		return "", err
-	}
-	defer out.Close()
-
-	if _, err := fileutil.StreamBody(resp.Body, out, 0, resp.ContentLength, progress); err != nil {
-		return "", err
-	}
-
-	finalPath := filepath.Join(config.BinPath(), filename)
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		return "", err
-	}
-
-	return finalPath, nil
 }
 
 // GetManifest fetches the HuggingFace manifest for a model, which includes
@@ -375,20 +318,25 @@ func (c *Client) GetManifest(user, repo, tag string) (*Manifest, []byte, error) 
 }
 
 // FetchFolderQuantSizes fills in Size for folder-style quantizations by
-// summing the sizes of GGUF files in each directory.
+// summing the sizes of GGUF files in each directory. Errors from per-directory
+// lookups are logged at debug level; callers get whatever sizes succeeded since
+// this data is informational (used for "available quants" display).
 func (c *Client) FetchFolderQuantSizes(user, repo, branch string, quants []Quantization) {
 	for i := range quants {
-		if quants[i].Size == 0 {
-			dirFiles, err := c.ListFilesInPath(user, repo, branch, quants[i].Tag)
-			if err == nil {
-				var total int64
-				for _, f := range dirFiles {
-					if strings.HasSuffix(f.Path, ".gguf") {
-						total += f.Size
-					}
-				}
-				quants[i].Size = total
+		if quants[i].Size != 0 {
+			continue
+		}
+		dirFiles, err := c.ListFilesInPath(user, repo, branch, quants[i].Tag)
+		if err != nil {
+			logs.Debug("failed to fetch folder size", "repo", user+"/"+repo, "quant", quants[i].Tag, "error", err)
+			continue
+		}
+		var total int64
+		for _, f := range dirFiles {
+			if strings.HasSuffix(f.Path, ".gguf") {
+				total += f.Size
 			}
 		}
+		quants[i].Size = total
 	}
 }

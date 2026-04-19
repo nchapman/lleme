@@ -16,39 +16,23 @@ func TestPortAllocator(t *testing.T) {
 		t.Errorf("Port %d outside range 59000-59005", port1)
 	}
 
-	// Should track allocated ports
-	if !allocator.IsAllocated(port1) {
-		t.Errorf("Port %d should be marked as allocated", port1)
+	// Distinct ports on subsequent allocations
+	port2, err := allocator.Allocate()
+	if err != nil {
+		t.Fatalf("Second allocation failed: %v", err)
+	}
+	if port2 == port1 {
+		t.Errorf("Second allocation returned duplicate port %d", port2)
 	}
 
-	// Allocate more ports
-	port2, _ := allocator.Allocate()
-	_, _ = allocator.Allocate() // port3
-
-	if allocator.AllocatedCount() != 3 {
-		t.Errorf("AllocatedCount() = %d, want 3", allocator.AllocatedCount())
-	}
-
-	// Release a port
+	// Release a port and confirm it can be reallocated
 	allocator.Release(port2)
-
-	if allocator.IsAllocated(port2) {
-		t.Errorf("Port %d should not be allocated after release", port2)
-	}
-
-	if allocator.AllocatedCount() != 2 {
-		t.Errorf("AllocatedCount() = %d, want 2", allocator.AllocatedCount())
-	}
-
-	// Should be able to reallocate the released port
-	port4, err := allocator.Allocate()
+	port3, err := allocator.Allocate()
 	if err != nil {
 		t.Fatalf("Allocation after release failed: %v", err)
 	}
-
-	// The reallocated port should be the released one or another available port
-	if port4 < 59000 || port4 > 59005 {
-		t.Errorf("Reallocated port %d outside range", port4)
+	if port3 < 59000 || port3 > 59005 {
+		t.Errorf("Reallocated port %d outside range", port3)
 	}
 }
 

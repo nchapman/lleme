@@ -230,7 +230,7 @@ func downloadAllFiles(client *Client, user, repo string, files []fileDownload, t
 		}
 
 		if err := downloadFromHF(client, user, repo, fd.file, fd.destPath, progressFn); err != nil {
-			return err
+			return fmt.Errorf("download %s: %w", fd.file.RFilename, err)
 		}
 		downloaded += fd.file.Size
 	}
@@ -250,8 +250,10 @@ func downloadFromHF(client *Client, user, repo string, file *ManifestFile, destP
 		}
 	})
 
-	_, err := downloader.DownloadModel(user, repo, "main", file.RFilename, destPath)
-	return err
+	if _, err := downloader.DownloadModel(user, repo, "main", file.RFilename, destPath); err != nil {
+		return fmt.Errorf("download %s/%s %s: %w", user, repo, file.RFilename, err)
+	}
+	return nil
 }
 
 // verifyAllFiles verifies all downloaded files.

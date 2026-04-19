@@ -39,7 +39,7 @@ func (r *ModelResolver) ListDownloadedModels() ([]DownloadedModel, error) {
 
 	err := filepath.WalkDir(r.modelsPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			return fmt.Errorf("walk %s: %w", path, err)
 		}
 		if d.IsDir() || filepath.Ext(d.Name()) != ".gguf" {
 			return nil
@@ -47,7 +47,7 @@ func (r *ModelResolver) ListDownloadedModels() ([]DownloadedModel, error) {
 
 		relPath, err := filepath.Rel(r.modelsPath, path)
 		if err != nil {
-			return err
+			return fmt.Errorf("relative path of %s: %w", path, err)
 		}
 
 		parts := strings.Split(relPath, string(filepath.Separator))
@@ -65,7 +65,7 @@ func (r *ModelResolver) ListDownloadedModels() ([]DownloadedModel, error) {
 	})
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list downloaded models: %w", err)
 	}
 
 	return models, nil

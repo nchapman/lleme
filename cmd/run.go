@@ -94,7 +94,8 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 			} else {
 				ui.PrintError("Persona '%s' has no model. Specify one:", args[0])
 				fmt.Printf("  lleme run %s <model> [prompt]\n", args[0])
-				os.Exit(1)
+				ui.ExitFunc(1)
+				return
 			}
 
 			// Apply persona system prompt if not overridden by flag

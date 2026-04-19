@@ -39,7 +39,8 @@ Examples:
 		modelInfo, err := client.GetModel(user, repo)
 		if err != nil {
 			handleModelError(err, user, repo)
-			os.Exit(1)
+			ui.ExitFunc(1)
+			return
 		}
 
 		if bool(modelInfo.Gated) && !hf.HasToken(cfg) {
@@ -49,7 +50,8 @@ Examples:
 			fmt.Println("  1. Get a token at https://huggingface.co/settings/tokens")
 			fmt.Println("  2. Run: hf auth login")
 			fmt.Println("     Or set: export HF_TOKEN=hf_xxxxx")
-			os.Exit(1)
+			ui.ExitFunc(1)
+			return
 		}
 
 		files, err := client.ListFiles(user, repo, "main")
@@ -61,7 +63,8 @@ Examples:
 		if len(quants) == 0 {
 			ui.PrintError("No GGUF files found")
 			fmt.Printf("\nThe repository '%s/%s' exists but contains no GGUF files.\n", user, repo)
-			os.Exit(1)
+			ui.ExitFunc(1)
+			return
 		}
 
 		// Find the quantization to use
@@ -79,7 +82,8 @@ Examples:
 				for _, q := range hf.SortQuantizations(quants) {
 					fmt.Printf("  • %s (%s)\n", q.Name, ui.FormatBytes(q.Size))
 				}
-				os.Exit(1)
+				ui.ExitFunc(1)
+				return
 			}
 		}
 
