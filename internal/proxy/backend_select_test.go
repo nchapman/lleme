@@ -22,15 +22,16 @@ func TestSelectRuntime(t *testing.T) {
 	m := NewModelManager(DefaultConfig(), nil)
 
 	tests := []struct {
-		name    string
-		quant   string
-		kind    string
-		wantErr string
+		name     string
+		quant    string
+		kind     string
+		wantErr  string
+		wantKind BackendKind
 	}{
-		{"legacy empty defaults to gguf", "q_legacy", "", ""},
-		{"gguf returns llama runtime", "q_gguf", hf.BackendGGUF, ""},
-		{"mlx not yet implemented", "q_mlx", hf.BackendMLX, "MLX backend not yet implemented"},
-		{"unknown kind errors", "q_bogus", "bogus", "unknown backend kind"},
+		{"legacy empty defaults to gguf", "q_legacy", "", "", BackendKindLlama},
+		{"gguf returns llama runtime", "q_gguf", hf.BackendGGUF, "", BackendKindLlama},
+		{"mlx returns swiftlm runtime", "q_mlx", hf.BackendMLX, "", BackendKindMLX},
+		{"unknown kind errors", "q_bogus", "bogus", "unknown backend kind", ""},
 	}
 
 	for _, tt := range tests {
@@ -47,8 +48,8 @@ func TestSelectRuntime(t *testing.T) {
 				if err != nil {
 					t.Fatalf("selectRuntime: %v", err)
 				}
-				if rt.Kind() != BackendKindLlama {
-					t.Errorf("kind = %v, want llama", rt.Kind())
+				if rt.Kind() != tt.wantKind {
+					t.Errorf("kind = %v, want %v", rt.Kind(), tt.wantKind)
 				}
 				return
 			}

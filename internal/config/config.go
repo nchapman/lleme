@@ -47,6 +47,7 @@ type Config struct {
 	HuggingFace HuggingFace `yaml:"huggingface"`
 	Server      Server      `yaml:"server"`
 	LlamaCpp    LlamaCpp    `yaml:"llamacpp"`
+	SwiftLM     SwiftLM     `yaml:"swiftlm"`
 }
 
 type HuggingFace struct {
@@ -58,6 +59,12 @@ type LlamaCpp struct {
 	ServerPath string         `yaml:"server_path,omitempty"`
 	AutoUpdate *bool          `yaml:"auto_update,omitempty"`
 	Options    map[string]any `yaml:"options,omitempty"`
+}
+
+// SwiftLM holds settings for the MLX / SwiftLM runtime. Scoped separately
+// from LlamaCpp so flags from one backend don't bleed into the other.
+type SwiftLM struct {
+	Options map[string]any `yaml:"options,omitempty"`
 }
 
 // AutoUpdateEnabled reports whether background llama.cpp updates are enabled.
@@ -222,6 +229,29 @@ llamacpp:
 
     # --- Reasoning models ---
     # reasoning-format: auto   # Thinking token handling (auto, none, deepseek)
+
+# SwiftLM (MLX) server settings — only applies to MLX-format models on
+# Apple Silicon. Unknown keys are silently dropped, so llamacpp options
+# above won't break MLX backends.
+swiftlm:
+  # options:
+    # --- Core ---
+    # ctx-size: 8192           # Context window (KV cache)
+    # max-tokens: 2048         # Default max tokens per request
+    # parallel: 1              # Parallel request slots
+    # gpu-layers: auto         # "auto" or integer
+
+    # --- Sampling defaults (overridable per request) ---
+    # temp: 0.6                # Temperature (0 = greedy)
+    # top-p: 1.0               # Top-p / nucleus sampling
+    # top-k: 50                # Top-k (0 = disabled)
+    # min-p: 0.0               # Min-p sampling
+    # repeat-penalty: 1.0      # Repetition penalty
+
+    # --- Mode toggles ---
+    # thinking: false          # Qwen3.5-style reasoning mode
+    # vision: false            # Enable VLM (image inputs)
+    # audio: false             # Enable ALM (audio inputs)
 `
 
 func Load() (*Config, error) {

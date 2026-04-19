@@ -22,7 +22,7 @@ func (m *ModelManager) selectRuntime(user, repo, quant string) (Runtime, error) 
 	case hf.BackendGGUF:
 		return NewLlamaRuntime(m.appConfig), nil
 	case hf.BackendMLX:
-		return nil, fmt.Errorf("MLX backend not yet implemented (model %s/%s:%s)", user, repo, quant)
+		return NewSwiftLMRuntime(m.appConfig), nil
 	default:
 		return nil, fmt.Errorf("unknown backend kind %q for %s/%s:%s", kind, user, repo, quant)
 	}

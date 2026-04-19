@@ -176,14 +176,42 @@ func versionedDirName(tagName string) string {
 	return "SwiftLM-" + tagName + "-macos-arm64"
 }
 
+// extractTarGz unpacks the SwiftLM tarball into a fresh versioned directory
+// under destDir. Upstream ships the archive flat (files at the top level, no
+// wrapper directory), so we create binDir/SwiftLM-<tag>-macos-arm64/ and
+// extract into that — giving us a stable "versioned" layout the symlink and
+// pruner can target.
 func extractTarGz(archivePath, destDir, tagName string) error {
-	if err := binaryrelease.ExtractTarGz(archivePath, destDir); err != nil {
+	versionDir := versionedDirName(tagName)
+	versionPath := filepath.Join(destDir, versionDir)
+
+	// Extract into a staging directory, then rename into place. os.Rename
+	// is atomic when source and destination live on the same volume (both
+	// under destDir here), which avoids a concurrent installer racing
+	// against a half-extracted versionPath.
+	stagePath := versionPath + ".staging"
+	if err := os.RemoveAll(stagePath); err != nil {
+		return fmt.Errorf("clear stage %s: %w", stagePath, err)
+	}
+	if err := os.MkdirAll(stagePath, 0755); err != nil {
+		return fmt.Errorf("mkdir stage %s: %w", stagePath, err)
+	}
+	defer os.RemoveAll(stagePath) // no-op after successful rename
+	if err := binaryrelease.ExtractTarGz(archivePath, stagePath); err != nil {
 		return fmt.Errorf("extract %s: %w", archivePath, err)
 	}
-	versionDir := versionedDirName(tagName)
-	info, err := os.Stat(filepath.Join(destDir, versionDir))
-	if err != nil || !info.IsDir() {
-		return fmt.Errorf("expected directory %s not found in archive", versionDir)
+	// Sanity-check the binary landed where we expect.
+	binPath := filepath.Join(stagePath, "SwiftLM")
+	if info, err := os.Stat(binPath); err != nil || info.IsDir() {
+		return fmt.Errorf("SwiftLM binary not found in archive at %s", binPath)
+	}
+	// Drop any prior install at the target so Rename succeeds on linux
+	// where rename over a non-empty dir fails with ENOTEMPTY.
+	if err := os.RemoveAll(versionPath); err != nil {
+		return fmt.Errorf("clear %s: %w", versionPath, err)
+	}
+	if err := os.Rename(stagePath, versionPath); err != nil {
+		return fmt.Errorf("activate %s: %w", versionPath, err)
 	}
 	return binaryrelease.SwapCurrentSymlink(destDir, currentLinkName, versionDir)
 }
