@@ -2,7 +2,6 @@ name: GPT OSS
 source: https://unsloth.ai/docs/models/gpt-oss-how-to-run-and-fine-tune.md
 match:
   - "*/gpt-oss*"
-  - "*/GPT-OSS*"
 options:
   temp: 1.0
   top-p: 1.0

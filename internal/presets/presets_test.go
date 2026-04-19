@@ -45,19 +45,19 @@ func TestFind(t *testing.T) {
 		wantNoMatch bool
 	}{
 		{
-			name:      "Qwen3 Instruct full ref",
+			name:      "Qwen3.5 with Instruct suffix",
 			modelName: "unsloth/Qwen3.5-4B-Instruct-GGUF:Q4_K_M",
-			wantName:  "Qwen3 Instruct",
+			wantName:  "Qwen3.5",
 		},
 		{
-			name:      "Qwen3 Instruct bartowski",
+			name:      "Qwen3 base bartowski",
 			modelName: "bartowski/Qwen3-4B-Instruct-GGUF:Q4_K_M",
-			wantName:  "Qwen3 Instruct",
+			wantName:  "Qwen3",
 		},
 		{
-			name:      "Qwen3 Thinking",
+			name:      "Qwen3 thinking variant",
 			modelName: "unsloth/Qwen3-4B-Thinking-GGUF:Q4_K_M",
-			wantName:  "Qwen3 Thinking",
+			wantName:  "Qwen3",
 		},
 		{
 			name:      "Gemma 4",
@@ -72,17 +72,32 @@ func TestFind(t *testing.T) {
 		{
 			name:      "no quant suffix still matches",
 			modelName: "bartowski/Qwen3-4B-Instruct-GGUF",
-			wantName:  "Qwen3 Instruct",
+			wantName:  "Qwen3",
 		},
 		{
-			name:      "Qwen3.5 bare repo (no Instruct suffix)",
+			name:      "Qwen3.5 bare repo",
 			modelName: "unsloth/Qwen3.5-27B-GGUF:UD-Q4_K_XL",
-			wantName:  "Qwen3 Instruct",
+			wantName:  "Qwen3.5",
 		},
 		{
 			name:      "Qwen3.6 MoE",
 			modelName: "unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_XL",
-			wantName:  "Qwen3 Instruct",
+			wantName:  "Qwen3.6",
+		},
+		{
+			name:      "upstream Qwen namespace — Qwen3 base",
+			modelName: "Qwen/Qwen3-8B-GGUF:Q4_K_M",
+			wantName:  "Qwen3",
+		},
+		{
+			name:      "upstream Qwen namespace — Qwen3.5",
+			modelName: "Qwen/Qwen3.5-27B-Instruct:Q4_K_M",
+			wantName:  "Qwen3.5",
+		},
+		{
+			name:      "upstream Qwen namespace — Qwen3.6",
+			modelName: "Qwen/Qwen3.6-35B-A3B",
+			wantName:  "Qwen3.6",
 		},
 		{
 			name:      "GLM-4.7 Flash",

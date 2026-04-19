@@ -128,17 +128,18 @@ func repoName(modelName string) string {
 
 // Find returns the first preset (alphabetical by filename) whose match patterns
 // match modelName (user/repo:quant). Returns (preset, matchedPattern) or (nil, "").
-// Match is performed against the user/repo portion (quant suffix stripped).
+// Match is performed against the user/repo portion (quant suffix stripped) and
+// is case-insensitive — both the repo name and patterns are lowercased.
 func Find(modelName string) (*Preset, string) {
 	presets, err := Load()
 	if err != nil {
 		logs.Warn("Failed to load presets", "error", err)
 		return nil, ""
 	}
-	repo := repoName(modelName)
+	repo := strings.ToLower(repoName(modelName))
 	for _, p := range presets {
 		for _, pattern := range p.Match {
-			if ok, _ := path.Match(pattern, repo); ok {
+			if ok, _ := path.Match(strings.ToLower(pattern), repo); ok {
 				return p, pattern
 			}
 		}

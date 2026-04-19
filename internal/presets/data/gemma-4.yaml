@@ -2,7 +2,6 @@ name: Gemma 4
 source: https://unsloth.ai/docs/models/gemma-4.md
 match:
   - "*/gemma-4*"
-  - "*/Gemma-4*"
   - "*/gemma4*"
 options:
   temp: 1.0
