@@ -105,6 +105,11 @@ func TestFind(t *testing.T) {
 			wantName:  "GLM-4.7 Flash",
 		},
 		{
+			name:        "GLM-40B does not match GLM-4 Flash",
+			modelName:   "hypothetical-user/GLM-40B-Flash-GGUF:Q4_K_M",
+			wantNoMatch: true,
+		},
+		{
 			name:      "GPT OSS 20B",
 			modelName: "unsloth/gpt-oss-20b-GGUF:Q4_K_M",
 			wantName:  "GPT OSS",

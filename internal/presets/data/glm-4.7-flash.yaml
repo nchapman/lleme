@@ -1,7 +1,8 @@
 name: GLM-4.7 Flash
 source: https://unsloth.ai/docs/models/glm-4.7-flash.md
 match:
-  - "*/glm-4*flash*"
+  - "*/glm-4.*-flash*"
+  - "*/glm-4-flash*"
 options:
   temp: 1.0
   top-p: 0.95
