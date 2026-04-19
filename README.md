@@ -14,11 +14,12 @@ Drop-in replacement for OpenAI **and** Anthropic APIs — works with Claude Code
        alt="lleme demo" width="720">
 </video>
 
-- **Any GGUF on Hugging Face, directly.** `lleme run user/repo` — no custom registry, no republishing.
-- **One port, two protocols.** OpenAI- and Anthropic-compatible endpoints on `:11313`.
-- **Multi-model proxy.** Loads models on demand, unloads when idle, evicts the least-recently-used model when the limit is reached.
-- **Curated sampling per family.** Sensible defaults for Qwen, DeepSeek, gpt-oss, Llama, Gemma, Kimi, Phi, and more — applied automatically by matching the HF repo name.
-- **TUI built for reasoning models.** Thinking traces render separately from the response.
+- **Run any model from Hugging Face.** No custom registries or manual setup. Just `lleme run user/repo` to start chatting immediately.
+- **OpenAI & Anthropic APIs.** A single port serves both protocols natively. It's a drop-in replacement for Claude Code, Aider, and any other AI tool.
+- **Automatic model management.** Models load on demand and unload when idle. You never have to manually start servers or worry about freeing up VRAM.
+- **Good defaults, easy config.** Works well out of the box with sensible settings for most models, but easy to customize when you want to.
+- **Powerful CLI.** A modern terminal interface with markdown support, streaming, and full control over your models.
+- **Clean Web UI.** A polished browser-based chat interface available at `http://localhost:11313`.
 
 ## Installation
 
@@ -80,101 +81,46 @@ Claude Code issues requests to lleme, which loads the model on demand.
 
 OpenAI and Anthropic protocols live on the same endpoint. Point any existing client at `http://localhost:11313` — no other changes needed.
 
-**OpenAI:**
-```bash
-curl http://localhost:11313/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "unsloth/gemma-4-E2B-it-GGUF",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
-```
+### Automatic Model Serving
 
-**Anthropic:**
-```bash
-curl http://localhost:11313/v1/messages \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "unsloth/gemma-4-E2B-it-GGUF",
-    "max_tokens": 1024,
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
-```
+A reverse-proxy manages multiple backends. Models load on demand, unload after a configurable idle timeout, and the least-recently-used model is evicted once the memory limit is reached.
 
-### Model-family presets
+### Terminal & Web UI
 
-lleme ships with curated sampling defaults for every major model family. When you run a model, lleme matches the repo name against known patterns and applies the right settings automatically. No more hunting "best sampler settings for Qwen3-Coder" on Reddit.
-
-```
-$ lleme run unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF
-Using preset: Qwen3-Coder (matched */Qwen3-Coder-*)
-...
-```
-
-Presets are overridden by config, personas, and CLI flags — see [Settings resolution](#settings-resolution) below.
-
-### Multi-model serving
-
-A reverse-proxy manages multiple `llama.cpp` backends. Models load on demand, unload after a configurable idle timeout, and the least-recently-used model is evicted once the max is reached (3 by default).
-
-```bash
-lleme server start          # start proxy on :11313
-lleme server start -d       # ... detached
-lleme status                # show loaded models and idle times
-lleme unload <model>        # evict from memory immediately
-```
-
-### Terminal UI
-
-A Bubbletea-powered chat with markdown rendering, streaming, and native handling of reasoning-model thinking tokens — thinking renders separately from the final response so you can watch the model work.
-
-### Web UI
-
-Visit `http://localhost:11313` in your browser once the server is running. Same API, same models, same personas — built on [assistant-ui](https://github.com/Yonom/assistant-ui).
+- **CLI**: A terminal chat with markdown rendering and streaming.
+- **Web**: A modern browser interface built on [assistant-ui](https://github.com/Yonom/assistant-ui), available at `http://localhost:11313`.
 
 ### Personas
 
-Save a system prompt, a model, and sampling overrides under a named persona. Use it anywhere you'd use a model name:
+Save a system prompt, a model, and settings under a named persona. Use it anywhere you'd use a model name:
 
 ```bash
-lleme persona create life-coach   # opens $EDITOR
-```
-
-```yaml
-# ~/.lleme/personas/life-coach.yaml
-model: unsloth/gemma-4-E2B-it-GGUF
-system: |
-  You are a pragmatic life coach. Keep responses short, specific, and
-  actionable. Ask a clarifying question when it helps; otherwise give
-  concrete next steps rather than general advice.
-options:
-  temp: 0.7
-  top-p: 0.9
+lleme persona create life-coach
 ```
 
 ```bash
 lleme run life-coach "help me plan this week"
 ```
 
-### Model discovery
+### Model Discovery
+
+Search, track trending models, and manage your local library:
 
 ```bash
-lleme search mistral                 # search HF for GGUF models
-lleme trending                       # trending GGUF models
-lleme info unsloth/gemma-4-E2B-it-GGUF   # downloads, likes, quants, sizes
-lleme list                           # list downloaded models
-lleme remove --older-than 30d        # prune stale models
-lleme remove --larger-than 10GB      # ... or large ones
+lleme search mistral     # search Hugging Face
+lleme trending           # see what's popular
+lleme list               # show downloaded models
+lleme remove --older-than 30d
 ```
 
 ## FAQ
 
 ### How does this compare to Ollama or LM Studio?
 
-- **Hugging Face native.** Any GGUF, any quant, no republishing. If it was uploaded this morning, you can `lleme run` it tonight.
-- **Anthropic API alongside OpenAI.** On the same port, so Claude Code (and anything else that speaks Messages) works locally with one env var.
-- **Curated sampling per family.** Built-in defaults that track upstream recommendations rather than user-written Modelfiles.
-- **CLI-first.** One Go binary — no desktop app (LM Studio), no tray process, no background services you didn't start.
+- **No background daemons.** `lleme` is a single Go binary. It doesn't install persistent background services or tray icons that stay running when you're not using them.
+- **Honest about the engine.** We don't hide that we use `llama.cpp`. `lleme` acts as a high-level manager for the industry-standard inference engine, providing better defaults and a dual-protocol API.
+- **True Hugging Face native.** We don't maintain a separate model library. If a GGUF exists on Hugging Face, it's available in `lleme` immediately with no republishing required.
+- **Native Anthropic support.** Most local runners only support the OpenAI API. `lleme` speaks both OpenAI and Anthropic natively, making it a drop-in backend for tools like Claude Code.
 
 ### Does it support vision models?
 
@@ -254,44 +200,31 @@ llamacpp:
 
 See [`llama-server` docs](https://github.com/ggml-org/llama.cpp/tree/master/tools/server) for the complete option list.
 
-### Settings resolution
+### Settings priority
 
-Inference options cascade from most to least specific:
-
-**session flags → persona → preset → config → `llama-server` defaults**
-
-A CLI flag always wins; a persona overrides a preset; presets only apply where you haven't configured something yourself. This means you can rely on built-in presets for most models and override only when needed.
+CLI flags always win, followed by persona settings, then global config. This means you can rely on global defaults for most models and override them only when needed for a specific task.
 
 ## Requirements
 
-- **macOS** (Apple Silicon or Intel) — Metal GPU acceleration via `llama.cpp`
-- **Linux** (x86_64, ARM64) — CPU by default; CUDA available in `llama.cpp` builds
-- **Disk**: models range from ~1 GB (small quants) to 100 GB+ (frontier). Check `lleme info <model>` before pulling.
-- **RAM**: Q4 of a 7B model needs ~5 GB; Q4 of a 70B model needs 40 GB+.
+- **macOS** (Apple Silicon or Intel) or **Linux** (x86_64, ARM64).
+- **GPU**: Metal (macOS) and CUDA (Linux) are supported via `llama.cpp`.
+- **Memory**: 8GB RAM is enough for small models; 32GB+ is recommended for 30B+ models.
+- **Disk**: Models range from 2GB to 50GB+. Check `lleme info <model>` before pulling.
 
 ## Troubleshooting
 
-**"model requires authentication"** — the repo is gated. Get a token at https://huggingface.co/settings/tokens and either run `hf auth login` or export `HF_TOKEN=hf_xxxxx`.
-
-**Port 11313 already in use** — change it with `lleme config set server.port <port>`, or stop whatever is bound via `lleme server stop`.
-
-**Model keeps getting unloaded** — raise the idle timeout: `lleme config set server.idle_timeout 1h`.
-
-**Out of memory while loading** — pick a smaller quant (`lleme info <model>` lists available quants) or lower `ctx-size` in config.
-
-**Slow on CPU** — confirm GPU offload is active: `lleme config set llamacpp.options.gpu-layers -1`.
+- **Authentication**: If a model is "gated," set `HF_TOKEN` or run `hf auth login`.
+- **Port Busy**: Change the port with `lleme config set server.port <port>`.
+- **Out of Memory**: Use a smaller quantization or lower `ctx-size` in your config.
+- **Slow Performance**: Ensure GPU offload is active with `lleme config set llamacpp.options.gpu-layers -1`.
 
 ## Data and logs
 
-All data lives in `~/.lleme/` (override with `LLEME_HOME`):
-
-- `config.yaml` — user configuration
-- `models/` — downloaded GGUF files (`user/repo/quant.gguf`)
-- `personas/` — saved personas
-- `bin/` — `llama.cpp` binaries
-- `logs/` — rotating log files (10 MB, 3 generations)
-  - `proxy.log` — proxy server
-  - `<model>.log` — per-model backend
+Everything is stored in `~/.lleme/`:
+- `config.yaml`: Your settings.
+- `models/`: Downloaded GGUF files.
+- `personas/`: Saved system prompts and settings.
+- `logs/`: Logs for the proxy and individual model backends.
 
 ## Privacy
 
