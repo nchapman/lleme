@@ -162,6 +162,25 @@ func pullMLX(client *hf.Client, user, repo, quant string) {
 	}
 
 	modelName := ui.Keyword(hf.FormatModelName(user, repo, quant))
+
+	// Freshness: skip re-download when every file already matches remote
+	// size. Mirrors the GGUF CheckForUpdates branch above the switch.
+	upToDate, saveManifest, remoteFiles, err := hf.CheckForUpdatesMLX(client, user, repo, quant)
+	if err != nil {
+		ui.Fatal("%v", err)
+	}
+	if upToDate {
+		if saveManifest {
+			// Legacy pull without a manifest — persist one now so the next
+			// check is a cheap JSON compare.
+			if err := hf.SaveMLXManifest(user, repo, quant, remoteFiles); err != nil {
+				ui.Fatal("Failed to save MLX manifest: %v", err)
+			}
+		}
+		fmt.Printf("%s is already up to date\n", modelName)
+		return
+	}
+
 	fmt.Printf("Pulling %s (MLX)\n", modelName)
 
 	result, err := hf.PullMLXModelWithProgress(client, user, repo, quant, newProgressBar)

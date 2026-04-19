@@ -256,6 +256,7 @@ func RemoveLocalModel(m LocalModel) error {
 	// Associated per-quant files (best-effort — missing is fine).
 	_ = os.Remove(GetManifestFilePath(m.User, m.Repo, m.Quant))
 	_ = os.Remove(GetMMProjFilePath(m.User, m.Repo, m.Quant))
+	_ = os.Remove(GetMLXManifestFilePath(m.User, m.Repo, m.Quant))
 
 	// Drop the quant entry from metadata.yaml so it stops appearing in list.
 	if meta, err := LoadMetadata(m.User, m.Repo); err == nil {

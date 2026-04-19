@@ -2,6 +2,7 @@ package hf
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -135,6 +136,95 @@ func TestPullMLXModelUsesSafeJoin(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "binaryrelease.SafeJoin") {
 		t.Error("PullMLXModel must route HF-sourced paths through binaryrelease.SafeJoin")
+	}
+}
+
+// MLX manifest round-trip: write then read back matches the input.
+func TestMLXManifestRoundTrip(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	remote := []FileTree{
+		{Path: "config.json", Size: 100},
+		{Path: "model.safetensors", Size: 9001},
+	}
+	if err := SaveMLXManifest("u", "r", "4bit", remote); err != nil {
+		t.Fatalf("SaveMLXManifest: %v", err)
+	}
+	got, err := LoadMLXManifest("u", "r", "4bit")
+	if err != nil {
+		t.Fatalf("LoadMLXManifest: %v", err)
+	}
+	if got == nil || got.Version != mlxManifestVersion || len(got.Files) != 2 {
+		t.Fatalf("unexpected manifest: %+v", got)
+	}
+	if got.Files[1].Size != 9001 {
+		t.Errorf("size not round-tripped: %+v", got.Files[1])
+	}
+}
+
+// manifestMatches hits when sizes match, misses on drift, and misses when a
+// local file was deleted between pulls.
+func TestMLXManifestMatches(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel string, size int64) {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, make([]byte, size), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile("config.json", 100)
+	writeFile("model.safetensors", 9001)
+
+	remote := []FileTree{
+		{Path: "config.json", Size: 100},
+		{Path: "model.safetensors", Size: 9001},
+	}
+	manifest := &MLXManifest{
+		Version: mlxManifestVersion,
+		Files: []MLXManifestFile{
+			{Path: "config.json", Size: 100},
+			{Path: "model.safetensors", Size: 9001},
+		},
+	}
+
+	if !mlxManifestMatches(dir, remote, manifest) {
+		t.Error("matching remote + local + manifest should be up-to-date")
+	}
+
+	// Remote drift: one file resized upstream.
+	driftedRemote := []FileTree{
+		{Path: "config.json", Size: 100},
+		{Path: "model.safetensors", Size: 9999},
+	}
+	if mlxManifestMatches(dir, driftedRemote, manifest) {
+		t.Error("size drift in remote should not be up-to-date")
+	}
+
+	// Local drift: user deleted a file.
+	if err := os.Remove(filepath.Join(dir, "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	if mlxManifestMatches(dir, remote, manifest) {
+		t.Error("missing local file should not be up-to-date")
+	}
+}
+
+// The fallback path (no manifest) matches when every remote file is present
+// locally with the expected size, and misses otherwise.
+func TestMLXFilesMatchDiskFallback(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), make([]byte, 50), 0644); err != nil {
+		t.Fatal(err)
+	}
+	remote := []FileTree{{Path: "config.json", Size: 50}}
+	if !mlxFilesMatchDisk(dir, remote) {
+		t.Error("exact-size match should return true")
+	}
+	remote[0].Size = 60
+	if mlxFilesMatchDisk(dir, remote) {
+		t.Error("size mismatch should return false")
 	}
 }
 
