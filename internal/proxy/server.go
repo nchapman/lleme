@@ -21,6 +21,7 @@ import (
 
 	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/hf"
+	"github.com/nchapman/lleme/internal/llama"
 	"github.com/nchapman/lleme/internal/logs"
 	"github.com/nchapman/lleme/internal/version"
 )
@@ -31,13 +32,15 @@ const maxRequestBodyBytes = 10 * 1024 * 1024
 
 // Server is the main proxy server that routes requests to backends
 type Server struct {
-	httpServer   *http.Server
-	manager      *ModelManager
-	idleMonitor  *IdleMonitor
-	config       *Config
-	startedAt    time.Time
-	shutdownChan chan struct{}
-	stateMu      sync.Mutex // protects state file writes
+	httpServer       *http.Server
+	manager          *ModelManager
+	idleMonitor      *IdleMonitor
+	config           *Config
+	appConfig        *config.Config
+	startedAt        time.Time
+	shutdownChan     chan struct{}
+	autoUpdateCancel context.CancelFunc
+	stateMu          sync.Mutex // protects state file writes
 }
 
 // NewServer creates a new proxy server
@@ -50,6 +53,7 @@ func NewServer(cfg *Config, appCfg *config.Config) *Server {
 	s := &Server{
 		manager:      manager,
 		config:       cfg,
+		appConfig:    appCfg,
 		startedAt:    time.Now(),
 		shutdownChan: make(chan struct{}),
 	}
@@ -111,12 +115,60 @@ func (s *Server) Start() error {
 	// Save initial state (no backends yet)
 	s.saveState()
 
+	// Check for llama.cpp updates in the background. Running backends keep using
+	// their currently-loaded binary; the new version is picked up on next model load.
+	ctx, cancel := context.WithCancel(context.Background())
+	s.autoUpdateCancel = cancel
+	go s.autoUpdateLlamaCpp(ctx)
+
 	return nil
+}
+
+// autoUpdateLlamaCpp checks for a newer llama.cpp release and installs it in
+// the background. Runs on proxy startup. Failures are logged and do not affect
+// the proxy — the existing llama.cpp install remains functional. The context is
+// canceled on Stop so an in-flight download aborts rather than swapping the
+// llama-current symlink after shutdown.
+func (s *Server) autoUpdateLlamaCpp(ctx context.Context) {
+	if s.appConfig == nil || !s.appConfig.LlamaCpp.AutoUpdateEnabled() {
+		return
+	}
+
+	latest, installed, err := llama.NewerVersionAvailable()
+	if err != nil {
+		logs.Debug("llama.cpp auto-update check failed", "error", err)
+		return
+	}
+	if latest == nil {
+		return
+	}
+
+	fromTag := ""
+	if installed != nil {
+		fromTag = installed.TagName
+	}
+	logs.Info("Auto-updating llama.cpp in background", "from", fromTag, "to", latest.TagName)
+
+	info, err := llama.InstallReleaseForAutoUpdate(ctx, latest, nil)
+	if err != nil {
+		if ctx.Err() != nil {
+			logs.Debug("llama.cpp auto-update canceled on shutdown", "error", err)
+			return
+		}
+		logs.Warn("llama.cpp auto-update failed", "error", err)
+		return
+	}
+	logs.Info("llama.cpp auto-update installed; new model loads will use this version", "version", info.TagName)
 }
 
 // Stop gracefully stops the proxy server
 func (s *Server) Stop() error {
 	close(s.shutdownChan)
+
+	// Cancel any in-flight background auto-update so its download aborts.
+	if s.autoUpdateCancel != nil {
+		s.autoUpdateCancel()
+	}
 
 	// Stop idle monitor
 	s.idleMonitor.Stop()

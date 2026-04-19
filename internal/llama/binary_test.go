@@ -1,13 +1,24 @@
 package llama
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestGetPlatform(t *testing.T) {
@@ -499,6 +510,556 @@ func TestRemoveOldVersions(t *testing.T) {
 			t.Error("version.json should not be removed")
 		}
 	})
+}
+
+func TestPruneOldVersionsKeepPrior(t *testing.T) {
+	t.Run("retains the N most recent prior directories by mtime", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		// Create version dirs and set distinct mtimes so newest-first ordering is deterministic.
+		type entry struct {
+			name  string
+			mtime time.Time
+		}
+		now := time.Now()
+		versions := []entry{
+			{"llama-b8169", now},
+			{"llama-b8168", now.Add(-1 * time.Hour)},
+			{"llama-b8167", now.Add(-2 * time.Hour)},
+			{"llama-b8166", now.Add(-3 * time.Hour)},
+			{"llama-b8165", now.Add(-4 * time.Hour)},
+		}
+		for _, v := range versions {
+			dir := filepath.Join(tmpDir, v.name)
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				t.Fatalf("Failed to create %s: %v", v.name, err)
+			}
+			if err := os.Chtimes(dir, v.mtime, v.mtime); err != nil {
+				t.Fatalf("Failed to set mtime on %s: %v", v.name, err)
+			}
+		}
+
+		// keepPrior=2 should retain b8168 and b8167 alongside the current (b8169).
+		pruneOldVersions(tmpDir, "b8169", 2)
+
+		for _, keep := range []string{"llama-b8169", "llama-b8168", "llama-b8167"} {
+			if _, err := os.Stat(filepath.Join(tmpDir, keep)); err != nil {
+				t.Errorf("%s should be retained", keep)
+			}
+		}
+		for _, prune := range []string{"llama-b8166", "llama-b8165"} {
+			if _, err := os.Stat(filepath.Join(tmpDir, prune)); !os.IsNotExist(err) {
+				t.Errorf("%s should be pruned", prune)
+			}
+		}
+	})
+}
+
+func TestNewerVersionAvailable(t *testing.T) {
+	t.Run("returns no-op when not installed", func(t *testing.T) {
+		t.Setenv("LLEME_HOME", t.TempDir())
+
+		latest, installed, err := NewerVersionAvailable()
+		if err != nil {
+			t.Fatalf("Expected no error when not installed, got %v", err)
+		}
+		if latest != nil {
+			t.Error("Expected no latest version when not installed")
+		}
+		if installed != nil {
+			t.Error("Expected installed to be nil when not installed")
+		}
+	})
+
+	t.Run("returns nil latest when already up-to-date", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("LLEME_HOME", home)
+		writeInstalledVersion(t, "b8169")
+
+		srv := mockGitHubLatest(t, "b8169")
+		defer srv.Close()
+		withAPIBase(t, srv.URL)
+
+		latest, installed, err := NewerVersionAvailable()
+		if err != nil {
+			t.Fatalf("Expected no error when up-to-date, got %v", err)
+		}
+		if latest != nil {
+			t.Errorf("Expected no latest when up-to-date, got %+v", latest)
+		}
+		if installed == nil || installed.TagName != "b8169" {
+			t.Errorf("Expected installed=b8169, got %+v", installed)
+		}
+	})
+
+	t.Run("returns latest when newer is available", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("LLEME_HOME", home)
+		writeInstalledVersion(t, "b8169")
+
+		srv := mockGitHubLatest(t, "b8170")
+		defer srv.Close()
+		withAPIBase(t, srv.URL)
+
+		latest, installed, err := NewerVersionAvailable()
+		if err != nil {
+			t.Fatalf("Expected no error, got %v", err)
+		}
+		if latest == nil || latest.TagName != "b8170" {
+			t.Errorf("Expected latest=b8170, got %+v", latest)
+		}
+		if installed == nil || installed.TagName != "b8169" {
+			t.Errorf("Expected installed=b8169, got %+v", installed)
+		}
+	})
+
+	t.Run("propagates fetch error but still reports installed", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("LLEME_HOME", home)
+		writeInstalledVersion(t, "b8169")
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+		withAPIBase(t, srv.URL)
+
+		latest, installed, err := NewerVersionAvailable()
+		if err == nil {
+			t.Fatal("Expected error when fetch fails")
+		}
+		if latest != nil {
+			t.Errorf("Expected no latest on error, got %+v", latest)
+		}
+		if installed == nil || installed.TagName != "b8169" {
+			t.Errorf("Expected installed reported even on fetch error, got %+v", installed)
+		}
+	})
+}
+
+func TestGetLatestVersionRejectsBadTag(t *testing.T) {
+	tests := []struct {
+		name    string
+		tag     string
+		wantErr bool
+	}{
+		{"valid tag", "b8169", false},
+		{"valid high-numbered tag", "b999999", false},
+		{"path traversal in tag", "../../../etc/passwd", true},
+		{"shell metachar", "b8169; rm -rf /", true},
+		{"empty tag", "", true},
+		{"non-b prefix", "v1.0.0", true},
+		{"embedded slash", "b8169/extra", true},
+		{"leading slash", "/b8169", true},
+		{"wrong case", "B8169", true},
+		{"non-numeric suffix", "babc", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := mockGitHubLatest(t, tt.tag)
+			defer srv.Close()
+			withAPIBase(t, srv.URL)
+
+			_, err := GetLatestVersion()
+			if tt.wantErr && err == nil {
+				t.Errorf("Expected error for tag %q, got nil", tt.tag)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("Expected no error for tag %q, got %v", tt.tag, err)
+			}
+		})
+	}
+}
+
+func TestValidateDownloadURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{"github.com https", "https://github.com/ggml-org/llama.cpp/releases/download/b8169/asset.tar.gz", false},
+		{"objects.githubusercontent.com", "https://objects.githubusercontent.com/foo", false},
+		{"release-assets.githubusercontent.com", "https://release-assets.githubusercontent.com/foo", false},
+		{"http scheme rejected in prod", "http://github.com/foo", true},
+		{"file scheme rejected", "file:///etc/passwd", true},
+		{"attacker host rejected", "https://attacker.example.com/evil.tar.gz", true},
+		{"host-spoof with github in path rejected", "https://attacker.example.com/github.com/foo", true},
+		{"empty URL rejected", "", true},
+		{"malformed URL rejected", "://not-a-url", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateDownloadURL(tt.url)
+			if tt.wantErr && err == nil {
+				t.Errorf("Expected error for %q, got nil", tt.url)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("Expected no error for %q, got %v", tt.url, err)
+			}
+		})
+	}
+}
+
+func TestDownloadBinaryRejectsBadURL(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "out.tar.gz")
+	err := DownloadBinary("https://attacker.example.com/evil.tar.gz", dest, nil)
+	if err == nil {
+		t.Fatal("Expected error for disallowed host")
+	}
+	if !strings.Contains(err.Error(), "allowlist") {
+		t.Errorf("Expected allowlist error, got %v", err)
+	}
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Error("Expected no file to be created for rejected URL")
+	}
+}
+
+func TestDownloadBinaryEnforcesSizeCap(t *testing.T) {
+	t.Run("content-length over cap is rejected before streaming starts", func(t *testing.T) {
+		withMaxDownloadBytes(t, 1024)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", maxDownloadBytes+1))
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+		withDownloadHost(t, srv)
+
+		dest := filepath.Join(t.TempDir(), "out.tar.gz")
+		err := DownloadBinary(srv.URL+"/asset.tar.gz", dest, nil)
+		if err == nil || !strings.Contains(err.Error(), "exceeds max") {
+			t.Errorf("Expected content-length cap error, got %v", err)
+		}
+	})
+
+	t.Run("streaming guard fires when content-length is absent", func(t *testing.T) {
+		withMaxDownloadBytes(t, 512)
+		// With no declared Content-Length, Go uses chunked transfer and we can
+		// stream past the client's cap. The LimitReader + post-write check
+		// must catch this.
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			flusher, _ := w.(http.Flusher)
+			chunk := []byte(strings.Repeat("A", 512))
+			for range 16 {
+				if _, err := w.Write(chunk); err != nil {
+					return
+				}
+				flusher.Flush()
+			}
+		}))
+		defer srv.Close()
+		withDownloadHost(t, srv)
+
+		dest := filepath.Join(t.TempDir(), "out.tar.gz")
+		err := DownloadBinary(srv.URL+"/asset.tar.gz", dest, nil)
+		if err == nil || !strings.Contains(err.Error(), "exceeded max size") {
+			t.Errorf("Expected streaming overflow error, got %v", err)
+		}
+		// The partial file must not have been promoted to the final path.
+		if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+			t.Error("Expected no file at dest after overflow rejection")
+		}
+	})
+
+	t.Run("legitimate payload under cap succeeds", func(t *testing.T) {
+		withMaxDownloadBytes(t, 1<<20) // 1 MiB
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			payload := []byte(strings.Repeat("A", 1024))
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(payload)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(payload)
+		}))
+		defer srv.Close()
+		withDownloadHost(t, srv)
+
+		dest := filepath.Join(t.TempDir(), "out.tar.gz")
+		if err := DownloadBinary(srv.URL+"/asset.tar.gz", dest, nil); err != nil {
+			t.Errorf("Expected success for under-cap payload, got %v", err)
+		}
+		info, err := os.Stat(dest)
+		if err != nil {
+			t.Fatalf("Expected dest file to exist, got %v", err)
+		}
+		if info.Size() != 1024 {
+			t.Errorf("Expected 1024 bytes, got %d", info.Size())
+		}
+	})
+}
+
+func TestDownloadBinaryContextCancellation(t *testing.T) {
+	// Server streams slowly so the client cancel arrives mid-body.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000000")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		buf := make([]byte, 1024)
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			default:
+			}
+			if _, err := w.Write(buf); err != nil {
+				return
+			}
+			flusher.Flush()
+			time.Sleep(20 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+	withDownloadHost(t, srv)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	dest := filepath.Join(t.TempDir(), "out.tar.gz")
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- DownloadBinaryContext(ctx, srv.URL+"/asset.tar.gz", dest, nil)
+	}()
+
+	// Give the request time to reach the server, then cancel.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Error("Expected error on canceled context")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Download did not abort after context cancel")
+	}
+}
+
+func TestDownloadBinaryBlocksDisallowedRedirect(t *testing.T) {
+	// Allowed entry issues a 302 to an off-allowlist host. The CheckRedirect
+	// callback must reject before the HTTP client connects to the attacker.
+	const attackerURL = "https://attacker.example.com/evil.tar.gz"
+	entry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, attackerURL, http.StatusFound)
+	}))
+	defer entry.Close()
+	withDownloadHost(t, entry)
+
+	dest := filepath.Join(t.TempDir(), "out.tar.gz")
+	err := DownloadBinary(entry.URL+"/asset.tar.gz", dest, nil)
+	if err == nil {
+		t.Fatal("Expected redirect to attacker host to be blocked")
+	}
+	if !strings.Contains(err.Error(), "redirect blocked") {
+		t.Errorf("Expected redirect blocked error, got %v", err)
+	}
+}
+
+func TestSwapCurrentSymlinkAtomic(t *testing.T) {
+	t.Run("points llama-current at the target", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(tmpDir, "llama-b8169"), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := swapCurrentSymlink(tmpDir, "llama-b8169"); err != nil {
+			t.Fatalf("swapCurrentSymlink failed: %v", err)
+		}
+
+		target, err := os.Readlink(filepath.Join(tmpDir, "llama-current"))
+		if err != nil {
+			t.Fatalf("readlink: %v", err)
+		}
+		if target != "llama-b8169" {
+			t.Errorf("Expected symlink target llama-b8169, got %q", target)
+		}
+	})
+
+	t.Run("replaces an existing symlink without an ENOENT window", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		for _, name := range []string{"llama-b8168", "llama-b8169"} {
+			if err := os.MkdirAll(filepath.Join(tmpDir, name), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink("llama-b8168", filepath.Join(tmpDir, "llama-current")); err != nil {
+			t.Fatal(err)
+		}
+
+		// Spin a reader goroutine that stats the symlink in a tight loop;
+		// assert it never observes ENOENT across the swap.
+		done := make(chan struct{})
+		var wg sync.WaitGroup
+		var enoentSeen int64
+		for range 4 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-done:
+						return
+					default:
+					}
+					_, err := os.Readlink(filepath.Join(tmpDir, "llama-current"))
+					if err != nil && errors.Is(err, os.ErrNotExist) {
+						atomic.AddInt64(&enoentSeen, 1)
+					}
+				}
+			}()
+		}
+
+		// Perform many swaps to widen the observation window.
+		for range 200 {
+			if err := swapCurrentSymlink(tmpDir, "llama-b8169"); err != nil {
+				t.Fatalf("swap to b8169 failed: %v", err)
+			}
+			if err := swapCurrentSymlink(tmpDir, "llama-b8168"); err != nil {
+				t.Fatalf("swap to b8168 failed: %v", err)
+			}
+		}
+		close(done)
+		wg.Wait()
+
+		if atomic.LoadInt64(&enoentSeen) != 0 {
+			t.Errorf("llama-current disappeared %d times during swap — swap is not atomic", enoentSeen)
+		}
+	})
+
+	t.Run("clears stale tmp from a prior failed run", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(tmpDir, "llama-b8169"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		// Plant a stale tmp symlink as if a prior run crashed mid-stage.
+		if err := os.Symlink("llama-b0000", filepath.Join(tmpDir, ".llama-current.tmp")); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := swapCurrentSymlink(tmpDir, "llama-b8169"); err != nil {
+			t.Fatalf("Expected recovery from stale tmp, got %v", err)
+		}
+		target, err := os.Readlink(filepath.Join(tmpDir, "llama-current"))
+		if err != nil {
+			t.Fatalf("readlink: %v", err)
+		}
+		if target != "llama-b8169" {
+			t.Errorf("Expected target llama-b8169 after recovery, got %q", target)
+		}
+	})
+}
+
+func TestPruneRespectsSymlinkTarget(t *testing.T) {
+	t.Run("never deletes the directory llama-current points at", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		now := time.Now()
+		// b8165 is oldest by mtime — would normally be pruned with keepPrior=1.
+		// We'll point llama-current at it and pass a DIFFERENT currentTag to
+		// pruneOldVersions to simulate stale state. The symlink target must
+		// still survive.
+		versions := []struct {
+			name  string
+			mtime time.Time
+		}{
+			{"llama-b8169", now},
+			{"llama-b8168", now.Add(-1 * time.Hour)},
+			{"llama-b8167", now.Add(-2 * time.Hour)},
+			{"llama-b8165", now.Add(-10 * time.Hour)},
+		}
+		for _, v := range versions {
+			dir := filepath.Join(tmpDir, v.name)
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(dir, v.mtime, v.mtime); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink("llama-b8165", filepath.Join(tmpDir, "llama-current")); err != nil {
+			t.Fatal(err)
+		}
+
+		// currentTag says b8169, but the symlink actually resolves to b8165.
+		// keepPrior=1 would normally save only b8168; b8165 should survive
+		// anyway because it's the symlink target.
+		pruneOldVersions(tmpDir, "b8169", 1)
+
+		if _, err := os.Stat(filepath.Join(tmpDir, "llama-b8165")); err != nil {
+			t.Error("Symlink target should be retained even with mismatched currentTag")
+		}
+		if _, err := os.Stat(filepath.Join(tmpDir, "llama-b8169")); err != nil {
+			t.Error("currentTag directory should be retained")
+		}
+		if _, err := os.Stat(filepath.Join(tmpDir, "llama-b8168")); err != nil {
+			t.Error("Most-recent prior (b8168) should be retained with keepPrior=1")
+		}
+		if _, err := os.Stat(filepath.Join(tmpDir, "llama-b8167")); !os.IsNotExist(err) {
+			t.Error("b8167 should be pruned when keepPrior=1")
+		}
+	})
+}
+
+// --- helpers ---
+
+func withAPIBase(t *testing.T, url string) {
+	t.Helper()
+	old := apiBase
+	apiBase = url
+	t.Cleanup(func() { apiBase = old })
+}
+
+func withDownloadHost(t *testing.T, srv *httptest.Server) {
+	t.Helper()
+	u, err := urlHostnameFromHTTPTest(srv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowedDownloadHosts[u] = true
+	allowedDownloadSchemes["http"] = true
+	t.Cleanup(func() {
+		delete(allowedDownloadHosts, u)
+		delete(allowedDownloadSchemes, "http")
+	})
+}
+
+func urlHostnameFromHTTPTest(srv *httptest.Server) (string, error) {
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		return "", fmt.Errorf("unexpected httptest URL %q: %w", srv.URL, err)
+	}
+	return u.Hostname(), nil
+}
+
+func withMaxDownloadBytes(t *testing.T, limit int64) {
+	t.Helper()
+	old := maxDownloadBytes
+	maxDownloadBytes = limit
+	t.Cleanup(func() { maxDownloadBytes = old })
+}
+
+func mockGitHubLatest(t *testing.T, tagName string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/releases/latest") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		body := fmt.Sprintf(`{"tag_name": %q, "name": "release", "assets": []}`, tagName)
+		_, _ = io.WriteString(w, body)
+	}))
+}
+
+func writeInstalledVersion(t *testing.T, tag string) {
+	t.Helper()
+	binDir := filepath.Join(os.Getenv("LLEME_HOME"), "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	info := VersionFile{Llama: &VersionInfo{TagName: tag, BinaryPath: "/dev/null", InstalledAt: time.Now().Format(time.RFC3339)}}
+	data, err := json.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "version.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestGetPlatformLinuxVariants(t *testing.T) {
