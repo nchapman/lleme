@@ -27,13 +27,14 @@ func TestGetPlatform(t *testing.T) {
 		}
 	case "linux":
 		if runtime.GOARCH == "amd64" {
-			// On Linux x64, result depends on GPU detection
 			if result != "ubuntu-x64" && result != "ubuntu-vulkan-x64" {
 				t.Errorf("Expected platform ubuntu-x64 or ubuntu-vulkan-x64, got %s", result)
 			}
 		}
-		if runtime.GOARCH == "arm64" && result != "" {
-			t.Errorf("Expected empty platform for Linux ARM64 (unsupported), got %s", result)
+		if runtime.GOARCH == "arm64" {
+			if result != "ubuntu-arm64" && result != "ubuntu-vulkan-arm64" {
+				t.Errorf("Expected platform ubuntu-arm64 or ubuntu-vulkan-arm64, got %s", result)
+			}
 		}
 	}
 }
@@ -501,25 +502,32 @@ func TestRemoveOldVersions(t *testing.T) {
 }
 
 func TestGetPlatformLinuxVariants(t *testing.T) {
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-		t.Skip("Skipping Linux-specific test on non-Linux/amd64 platform")
+	if runtime.GOOS != "linux" {
+		t.Skip("Skipping Linux-specific test on non-Linux platform")
+	}
+
+	var plain, vulkan string
+	switch runtime.GOARCH {
+	case "amd64":
+		plain, vulkan = "ubuntu-x64", "ubuntu-vulkan-x64"
+	case "arm64":
+		plain, vulkan = "ubuntu-arm64", "ubuntu-vulkan-arm64"
+	default:
+		t.Skipf("Skipping Linux test on unsupported arch %s", runtime.GOARCH)
 	}
 
 	result := getPlatform()
-
-	// On Linux x64, should be either ubuntu-x64 (no Vulkan) or ubuntu-vulkan-x64 (Vulkan available)
-	validPlatforms := []string{"ubuntu-x64", "ubuntu-vulkan-x64"}
+	validPlatforms := []string{plain, vulkan}
 	if !slices.Contains(validPlatforms, result) {
-		t.Errorf("getPlatform() on Linux x64 = %q, want one of %v", result, validPlatforms)
+		t.Errorf("getPlatform() on Linux %s = %q, want one of %v", runtime.GOARCH, result, validPlatforms)
 	}
 
-	// Verify consistency with Vulkan support detection
 	// Platform selection is based on libvulkan.so availability, not GPU detection
 	hasVulkan := HasVulkanSupport()
-	if hasVulkan && result != "ubuntu-vulkan-x64" {
-		t.Errorf("Vulkan support detected but platform is %q, expected ubuntu-vulkan-x64", result)
+	if hasVulkan && result != vulkan {
+		t.Errorf("Vulkan support detected but platform is %q, expected %s", result, vulkan)
 	}
-	if !hasVulkan && result != "ubuntu-x64" {
-		t.Errorf("No Vulkan support but platform is %q, expected ubuntu-x64", result)
+	if !hasVulkan && result != plain {
+		t.Errorf("No Vulkan support but platform is %q, expected %s", result, plain)
 	}
 }

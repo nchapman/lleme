@@ -40,9 +40,10 @@ func HasVulkanSupport() bool {
 
 	// Check standard library paths
 	libPaths := []string{
-		"/usr/lib/x86_64-linux-gnu/libvulkan.so.1", // Debian/Ubuntu
-		"/usr/lib64/libvulkan.so.1",                // RHEL/Fedora
-		"/usr/lib/libvulkan.so.1",                  // Arch/other
+		"/usr/lib/x86_64-linux-gnu/libvulkan.so.1",  // Debian/Ubuntu x86_64
+		"/usr/lib/aarch64-linux-gnu/libvulkan.so.1", // Debian/Ubuntu ARM64
+		"/usr/lib64/libvulkan.so.1",                 // RHEL/Fedora
+		"/usr/lib/libvulkan.so.1",                   // Arch/other
 	}
 	for _, path := range libPaths {
 		if _, err := os.Stat(path); err == nil {
@@ -101,15 +102,21 @@ func getPlatform() string {
 		}
 		return "macos-x64"
 	case "linux":
-		if arch == "amd64" {
-			// Use Vulkan build if libvulkan.so is available
-			// llama.cpp handles GPU enumeration at runtime via vk::enumeratePhysicalDevices()
-			if HasVulkanSupport() {
+		// Use Vulkan build if libvulkan.so is available; llama.cpp enumerates
+		// GPU devices at runtime via vk::enumeratePhysicalDevices().
+		vulkan := HasVulkanSupport()
+		switch arch {
+		case "amd64":
+			if vulkan {
 				return "ubuntu-vulkan-x64"
 			}
 			return "ubuntu-x64"
+		case "arm64":
+			if vulkan {
+				return "ubuntu-vulkan-arm64"
+			}
+			return "ubuntu-arm64"
 		}
-		// llama.cpp does not ship Linux ARM64 binaries
 		return ""
 	default:
 		return ""

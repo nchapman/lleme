@@ -1,185 +1,223 @@
 # lleme
 
-The easy way to find, run, and manage local LLMs.
+Run local LLMs from Hugging Face with a single command.
+Drop-in replacement for OpenAI **and** Anthropic APIs — works with Claude Code and any other tool that speaks either protocol.
 
-## Features
+[![Release](https://img.shields.io/github/v/release/nchapman/lleme?color=blue)](https://github.com/nchapman/lleme/releases)
 
-- 🚀 **Run Any GGUF Model**: Download and run any model from Hugging Face with a single command.
-- 🔄 **Dynamic Multi-Model Serving**: Serves multiple models, loading them on-demand and unloading them when idle to conserve resources.
-- 💬 **Interactive & One-Shot Chat**: Chat with models in an interactive TUI or get quick answers via single command-line prompts.
-- 🔎 **Discover & Manage Models**: Search Hugging Face, view trending models, and manage your local model library (`list`, `pull`, `rm`).
-- 🤖 **Custom Personas**: Create and switch between custom personalities and system prompts for tailored interactions.
-- ⚡ **Universal API Support**: Acts as a local, drop-in replacement for both OpenAI and Anthropic APIs.
-- 🌐 **Web UI**: Chat with your models in a browser at `http://localhost:11313`.
-- ⚙️ **Powered by [llama.cpp](https://github.com/ggerganov/llama.cpp)**: Enjoy a zero-config start with smart defaults, or take full control with direct access to all underlying `llama.cpp` parameters.
+![lleme demo](https://tilde.quest/~nchapman/media/videos/lleme-demo.gif)
 
-## Install
+- **Run any model from Hugging Face.** No custom registries or manual setup. Just `lleme run user/repo` to start chatting immediately.
+- **OpenAI & Anthropic APIs.** A single port serves both protocols natively. It's a drop-in replacement for Claude Code, Aider, and any other AI tool.
+- **Automatic model management.** Models load on demand and unload when idle. You never have to manually start servers or worry about freeing up VRAM.
+- **Good defaults, easy config.** Works well out of the box with sensible settings for most models, but easy to customize when you want to.
+- **Powerful CLI.** A modern terminal interface with markdown support, streaming, and full control over your models.
+- **Clean Web UI.** A polished browser-based chat interface available at `http://localhost:11313`.
+
+## Installation
 
 **Homebrew (macOS/Linux):**
 ```bash
 brew install nchapman/tap/lleme
 ```
 
-**Go:**
+**Go** (requires Go 1.25+):
 ```bash
 go install github.com/nchapman/lleme@latest
 ```
 
 **Build from source:**
-
 ```bash
 git clone https://github.com/nchapman/lleme
 cd lleme
 go build -o lleme .
 ```
 
-## Usage
+`llama.cpp` is downloaded and installed automatically on first run.
+
+## Quickstart
+
+Run any GGUF model from Hugging Face:
 
 ```bash
-# Run a model (downloads automatically)
-lleme run unsloth/gpt-oss-20b-GGUF
-
-# One-shot prompt
-lleme run unsloth/gpt-oss-20b-GGUF "Explain quantum computing in one sentence"
-
-# Search for models
-lleme search mistral
-
-# List downloaded models
-lleme list    # or: lleme ls
-
-# Show running models
-lleme status  # or: lleme ps
+lleme run unsloth/gemma-4-E2B-it-GGUF
 ```
 
-**Note on Model Names:** `lleme` is smart about resolving downloaded model names via a case-insensitive substring search. For example, a partial query like `gpt-oss-20b` would match `unsloth/gpt-oss-20b-GGUF:Q4_K_M`. Punctuation is significant and not removed before matching. If a partial name matches uniquely, it runs. If it matches multiple quantizations of the same model, `lleme` picks the best one. If ambiguous, it will ask for more specifics.
+That's it. lleme picks a sensible quantization (`Q4_K_M` by default, ~3 GB plus a ~1 GB vision projector for this model), starts a proxy, and drops you into an interactive chat.
 
-_An animated demonstration of `lleme run` will go here._
-_To record one, you can use `asciinema rec lleme-demo.cast` then convert with `svg-term --in lleme-demo.cast --out lleme-demo.svg`._
+One-shot prompts and piped input work too:
+
+```bash
+lleme run unsloth/gemma-4-E2B-it-GGUF "Explain quantum computing in one sentence"
+
+cat bug-report.md | lleme run unsloth/gemma-4-E2B-it-GGUF "summarize this"
+```
+
+Partial names resolve automatically — `lleme run gemma-4` matches `unsloth/gemma-4-E2B-it-GGUF:Q4_K_M` as long as the name is unique. (The `:quant` suffix selects a specific quantization; omit it and lleme picks the best one available locally.)
+
+## Use with Claude Code
+
+lleme's Anthropic-compatible endpoint makes it a drop-in backend for [Claude Code](https://docs.anthropic.com/en/docs/claude-code):
+
+```bash
+lleme pull unsloth/Qwen3.6-35B-A3B-GGUF
+lleme server start -d
+ANTHROPIC_BASE_URL=http://127.0.0.1:11313 \
+  claude --model unsloth/Qwen3.6-35B-A3B-GGUF
+```
+
+Claude Code issues requests to lleme, which loads the model on demand.
+
+## Features
+
+### OpenAI & Anthropic Support
+
+OpenAI and Anthropic protocols live on the same endpoint. Point any existing client at `http://localhost:11313` — no other changes needed.
+
+### Automatic Model Serving
+
+A reverse-proxy manages multiple backends. Models load on demand, unload after a configurable idle timeout, and the least-recently-used model is evicted once the memory limit is reached.
+
+### Terminal & Web UI
+
+- **CLI**: A terminal chat with markdown rendering and streaming.
+- **Web**: A modern browser interface built on [assistant-ui](https://github.com/Yonom/assistant-ui), available at `http://localhost:11313`.
+
+### Personas
+
+Save a system prompt, a model, and settings under a named persona. Use it anywhere you'd use a model name:
+
+```bash
+lleme persona create life-coach
+```
+
+```bash
+lleme run life-coach "help me plan this week"
+```
+
+### Model Discovery
+
+Search, track trending models, and manage your local library:
+
+```bash
+lleme search mistral     # search Hugging Face
+lleme trending           # see what's popular
+lleme list               # show downloaded models
+lleme remove --older-than 30d
+```
 
 ## Commands
 
-| Category | Command | Alias | Description |
-|---|---|---|---|
-| Model | `run <model>` | | Chat with a model (auto-downloads if needed) |
-| Model | `pull <model>` | | Download a model from Hugging Face |
-| Model | `list` | `ls` | List downloaded models |
-| Model | `remove [pattern]` | `rm` | Delete downloaded models by name, pattern, or filter (--older-than, --larger-than) |
-| Model | `unload <model>` | | Unload a running model |
-| Model | `status` | `ps` | Show server status and loaded models |
-| Personas | `persona list` | | List all personas |
-| Personas | `persona create <name>` | | Create a new persona |
-| Personas | `persona show <name>` | | Show persona details |
-| Personas | `persona edit <name>` | | Edit a persona in your editor |
-| Personas | `persona rm <name>` | | Delete a persona |
-| Server | `server start` | | Start the proxy server |
-| Server | `server stop` | | Stop the proxy server |
-| Server | `server restart` | | Restart the proxy server |
-| Discovery | `search <query>` | | Search Hugging Face for GGUF models |
-| Discovery | `trending` | | Show trending GGUF models |
-| Discovery | `info <model>` | `show` | Show model details (downloads, likes, quants) |
-| Config | `config edit` | | Open config in your editor |
-| Config | `config show` | | Print current configuration |
-| Config | `config path` | | Print config file path |
-| Config | `config get <path>` | | Get a config value by dot-path |
-| Config | `config set <path> <value>` | | Set a config value by dot-path |
-| Config | `config reset` | | Reset config to defaults |
-| Config | `update` | | Update lleme and llama.cpp |
-| Config | `version` | | Show version information |
+| Category | Command | Description |
+|---|---|---|
+| Model | `run <model\|persona> [prompt]` | Chat with a model (auto-downloads if needed) |
+| Model | `pull <model>` | Download a model from Hugging Face |
+| Model | `list` / `ls` | List downloaded models |
+| Model | `remove [pattern]` / `rm` | Delete models by name, pattern, age, or size |
+| Model | `unload <model>` | Unload a running model |
+| Model | `status` / `ps` | Show server status and loaded models |
+| Personas | `persona list/show/create/edit/rm` | Manage personas |
+| Server | `server start/stop/restart` | Manage the proxy server |
+| Discovery | `search <query>` | Search Hugging Face for GGUF models |
+| Discovery | `trending` | Show trending GGUF models |
+| Discovery | `info <model>` / `show` | Show model details |
+| Config | `config show/edit/path/get/set/reset` | Manage configuration |
+| Other | `update` | Update lleme and llama.cpp |
+| Other | `version` | Show version information |
 
-### Advanced Model Removal
+Run `lleme <command> --help` for detailed flags.
 
-The `remove` command offers powerful filtering options to manage your downloaded models:
+### Removing models
 
--   **By specific name/pattern:**
-    ```bash
-    lleme remove user/repo:quant       # Remove a specific model quantization
-    lleme remove user/repo             # Remove all quantizations of a model
-    lleme remove user/*                # Remove all models from a specific user
-    lleme remove *                     # Remove all downloaded models
-    ```
--   **By age:**
-    ```bash
-    lleme remove --older-than 30d      # Remove models not used in 30 days
-    lleme remove --older-than 4w       # Remove models not used in 4 weeks
-    ```
--   **By size:**
-    ```bash
-    lleme remove --larger-than 10GB    # Remove models larger than 10GB
-    lleme remove --larger-than 500MB   # Remove models larger than 500MB
-    ```
--   **Combine patterns and filters:**
-    ```bash
-    lleme remove user/* --older-than 7d  # Remove models from 'user' not used in 7 days
-    ```
-    Use the `--force` (`-f`) flag to skip the confirmation prompt.
-
-## Multi-Model Support
-
-Lemme runs a proxy that manages multiple llama.cpp backends. Models load on demand and unload after a configurable idle period (defaulting to 10 minutes) to conserve resources.
-
-A web UI is available at `http://localhost:11313` when the server is running.
+The `remove` command supports patterns and filters, which can be combined:
 
 ```bash
-# Use the OpenAI-compatible API
-curl http://localhost:11313/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "unsloth/gpt-oss-20b-GGUF", "messages": [{"role": "user", "content": "Hello!"}]}'
+lleme remove user/repo:quant         # specific quantization
+lleme remove user/repo               # all quantizations of a model
+lleme remove user/*                  # all models from a user
+lleme remove *                       # everything
+lleme remove --older-than 30d        # unused in 30 days (also accepts h, w)
+lleme remove --larger-than 10GB      # larger than 10GB
+lleme remove user/* --older-than 7d  # combine pattern and filter
 ```
 
-## Using with Claude Code
-
-lleme supports the Anthropic Messages API, so you can use it as a backend for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
-
-**1. Pull a model with good instruction-following and tool-use capabilities:**
-
-```bash
-lleme pull unsloth/GLM-4.7-Flash-GGUF
-```
-
-**2. Start lleme and run Claude Code:**
-
-```bash
-lleme server start
-ANTHROPIC_BASE_URL=http://127.0.0.1:11313 claude --model unsloth/GLM-4.7-Flash-GGUF
-```
-
-That's it! Claude Code sends requests to lleme, which loads the model on demand.
-
-See the [Ollama blog post](https://ollama.com/blog/claude) for more details on using Claude Code with local models.
+Use `-f` / `--force` to skip the confirmation prompt.
 
 ## Configuration
 
-Config lives at `~/.lleme/config.yaml`. Edit with `lleme config edit` or view with `lleme config show`.
+Config lives at `~/.lleme/config.yaml`. View with `lleme config show`, edit with `lleme config edit`, or set keys directly:
+
+```bash
+lleme config set server.port 11314
+lleme config set huggingface.default_quant Q6_K
+lleme config set huggingface.token hf_xxxxx   # or export HF_TOKEN
+```
+
+Any `llama-server` flag can be set under `llamacpp.options`:
 
 ```yaml
 huggingface:
+  token: ""              # or set HF_TOKEN (required for gated models)
   default_quant: Q4_K_M
 
 server:
-  host: 127.0.0.1   # bind address (0.0.0.0 for all interfaces)
+  host: 127.0.0.1        # bind address (0.0.0.0 for all interfaces)
   port: 11313
-  max_models: 3
-  idle_timeout: 10m
+  max_models: 3          # concurrent models in memory
+  idle_timeout: 10m      # unload after this duration (30s, 10m, 1h)
 
 llamacpp:
   options:
-    # ctx-size: 4096
-    # gpu-layers: -1  # -1 = all layers on GPU
-    # threads: 8      # CPU threads
-    # parallel: 4     # concurrent requests per model
+    ctx-size: 8192       # context size
+    gpu-layers: -1       # -1 = all layers on GPU
+    flash-attn: auto
+    parallel: 4          # concurrent requests per backend
 ```
 
-See [llama-server docs](https://github.com/ggerganov/llama.cpp/tree/master/examples/server) for all available options.
+See [`llama-server` docs](https://github.com/ggml-org/llama.cpp/tree/master/tools/server) for the complete option list.
 
-## Logs
+### Settings priority
 
-Logs are stored in `~/.lleme/logs/`:
-- `proxy.log` - Proxy server logs
-- `<model-name>.log` - Per-model backend logs (e.g., `llama-3.2-3b-instruct-q4_k_m.log`)
+CLI flags always win, followed by persona settings, then global config. This means you can rely on global defaults for most models and override them only when needed for a specific task.
 
-Logs rotate automatically (max 10MB, keeps 3 generations).
+## Requirements
+
+- **macOS** (Apple Silicon or Intel) or **Linux** (x86_64, ARM64).
+- **GPU**: Metal (macOS) and Vulkan (Linux) are supported via `llama.cpp`. NVIDIA, AMD, and Intel GPUs work through the Vulkan backend when `libvulkan` is present.
+- **Memory**: 8GB RAM is enough for small models; 32GB+ is recommended for 30B+ models.
+- **Disk**: Models range from 2GB to 50GB+. Check `lleme info <model>` before pulling.
+
+## Troubleshooting
+
+- **Authentication**: If a model is "gated," set `HF_TOKEN` or run `hf auth login`.
+- **Port Busy**: Change the port with `lleme config set server.port <port>`.
+- **Out of Memory**: Use a smaller quantization or lower `ctx-size` in your config.
+- **Slow Performance**: Ensure GPU offload is active with `lleme config set llamacpp.options.gpu-layers -1`.
+
+## Data and logs
+
+Everything is stored in `~/.lleme/`:
+- `config.yaml`: Your settings.
+- `models/`: Downloaded GGUF files.
+- `personas/`: Saved system prompts and settings.
+- `logs/`: Logs for the proxy and individual model backends.
+
+## Privacy
+
+lleme sends no telemetry. Network calls happen only when you explicitly pull a model (Hugging Face), run `lleme update` (GitHub releases), or on first run when `llama.cpp` is downloaded.
+
+## Contributing
+
+Bug reports and PRs are welcome. For larger changes, please open an issue first to discuss direction. See [`AGENTS.md`](./AGENTS.md) for project conventions.
+
+## Acknowledgments
+
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) — the inference engine
+- [Hugging Face](https://huggingface.co) — model hosting and discovery
+- [Charmbracelet](https://charm.sh) — `bubbletea`, `lipgloss`, and `glamour` power the TUI
+- [assistant-ui](https://github.com/Yonom/assistant-ui) — the web chat interface
+- [Unsloth](https://unsloth.ai) — high-quality GGUF quantizations referenced in the examples
 
 ## License
 
-MIT
+MIT — see [LICENSE](./LICENSE).
