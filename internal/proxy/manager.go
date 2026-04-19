@@ -12,20 +12,16 @@ package proxy
 // process), it must not re-acquire it while holding b.mu.
 
 import (
-	"bufio"
 	"fmt"
-	"maps"
 	"net/http"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/hf"
-	"github.com/nchapman/lleme/internal/llama"
 	"github.com/nchapman/lleme/internal/logs"
 )
 
@@ -173,6 +169,7 @@ func (m *ModelManager) GetOrLoadBackend(modelQuery string, options map[string]an
 	backend = &Backend{
 		ModelName:    modelName,
 		ModelPath:    modelPath,
+		Runtime:      m.selectRuntime(modelPath, modelName),
 		Port:         port,
 		Status:       BackendStarting,
 		StartedAt:    time.Now(),
@@ -405,7 +402,7 @@ func (m *ModelManager) Resolver() *ModelResolver {
 	return m.resolver
 }
 
-// startBackend starts the llama-server process for a backend
+// startBackend starts the server process for a backend via its Runtime.
 func (m *ModelManager) startBackend(backend *Backend) {
 	defer func() {
 		// Ensure ReadyChan is closed even on error
@@ -414,12 +411,13 @@ func (m *ModelManager) startBackend(backend *Backend) {
 		}
 	}()
 
-	serverPath := llama.ServerPath()
-	args := m.buildArgs(backend)
+	rt := backend.Runtime
+	serverPath := rt.BinaryPath()
+	args := rt.BuildArgs(backend, m.config.Host)
 
 	cmd := exec.Command(serverPath, args...)
 	cmd.Env = os.Environ()
-	cmd.Dir = config.BinPath()
+	cmd.Dir = rt.WorkingDir()
 
 	// Create rotating log writer for this backend
 	logWriter, err := logs.NewRotatingWriter(logs.BackendLogPath(backend.ModelName))
@@ -462,96 +460,8 @@ func (m *ModelManager) startBackend(backend *Backend) {
 	}
 }
 
-func (m *ModelManager) buildArgs(backend *Backend) []string {
-	args := []string{
-		"--model", backend.ModelPath,
-		"--host", m.config.Host,
-		"--port", fmt.Sprintf("%d", backend.Port),
-		"--embeddings", // Enable /v1/embeddings endpoint
-		"--no-webui",   // Disable built-in web UI (lleme is a proxy)
-	}
-
-	// Check for mmproj file (vision model support)
-	if mmprojPath := findMMProjForModel(backend.ModelName); mmprojPath != "" {
-		args = append(args, "--mmproj", mmprojPath)
-	}
-
-	// Apply template patches to work around llama-server issues.
-	// See template.go for the patch registry and documentation.
-	if templatePath, err := ExtractAndPatchTemplate(backend.ModelPath); err == nil && templatePath != "" {
-		args = append(args, "--chat-template-file", templatePath)
-	}
-
-	// Merge config options with backend-specific options (backend overrides config)
-	mergedOptions := make(map[string]any)
-	maps.Copy(mergedOptions, m.appConfig.LlamaCpp.Options)
-	maps.Copy(mergedOptions, backend.Options)
-
-	// Pass through all llama-server options
-	args = append(args, buildLlamaServerArgs(mergedOptions)...)
-
-	return args
-}
-
-// findMMProjForModel parses the model name and checks if an mmproj file exists.
-// ModelName format: "user/repo:quant" (e.g., "ggml-org/gemma-3-4b-it-GGUF:Q4_K_M")
-func findMMProjForModel(modelName string) string {
-	parts := strings.Split(modelName, ":")
-	if len(parts) != 2 {
-		return ""
-	}
-
-	repoRef := parts[0]
-	quant := parts[1]
-
-	repoParts := strings.Split(repoRef, "/")
-	if len(repoParts) != 2 {
-		return ""
-	}
-
-	user := repoParts[0]
-	repo := repoParts[1]
-
-	return hf.FindMMProjFile(user, repo, quant)
-}
-
-// buildLlamaServerArgs converts the llama_server config map to command-line arguments.
-func buildLlamaServerArgs(config map[string]any) []string {
-	if config == nil {
-		return nil
-	}
-
-	var args []string
-	for key, value := range config {
-		flag := "--" + key
-
-		switch v := value.(type) {
-		case bool:
-			if v {
-				args = append(args, flag)
-			}
-			// false booleans are omitted (use default)
-		case int:
-			args = append(args, flag, fmt.Sprintf("%d", v))
-		case float64:
-			// YAML parses numbers as float64, check if it's a whole number
-			if v == float64(int(v)) {
-				args = append(args, flag, fmt.Sprintf("%d", int(v)))
-			} else {
-				args = append(args, flag, fmt.Sprintf("%g", v))
-			}
-		case string:
-			if v != "" {
-				args = append(args, flag, v)
-			}
-		}
-	}
-
-	return args
-}
-
 func (m *ModelManager) waitForReady(backend *Backend) error {
-	healthURL := fmt.Sprintf("http://%s:%d/health", m.config.Host, backend.Port)
+	healthURL := backend.Runtime.HealthURL(m.config.Host, backend.Port)
 	client := &http.Client{Timeout: 2 * time.Second}
 
 	logPath := logs.BackendLogPath(backend.ModelName)
@@ -568,7 +478,7 @@ func (m *ModelManager) waitForReady(backend *Backend) error {
 		}
 
 		// Check log for errors
-		if hasStartupError(logPath) {
+		if backend.Runtime.IsStartupError(logPath) {
 			return fmt.Errorf("server startup failed (check %s)", logPath)
 		}
 
@@ -576,26 +486,6 @@ func (m *ModelManager) waitForReady(backend *Backend) error {
 	}
 
 	return fmt.Errorf("server did not become ready within %v", m.config.StartupTimeout)
-}
-
-func hasStartupError(logFile string) bool {
-	file, err := os.Open(logFile)
-	if err != nil {
-		return false
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.ToLower(scanner.Text())
-		if strings.Contains(line, "error") && strings.Contains(line, "failed") {
-			return true
-		}
-		if strings.Contains(line, "could not load model") {
-			return true
-		}
-	}
-	return false
 }
 
 func (m *ModelManager) updateLRU(modelName string) {
