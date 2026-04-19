@@ -64,12 +64,9 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 			ui.Fatal("Failed to load config: %v", err)
 		}
 
-		// Step 1: Ensure llama.cpp is installed
-		if !llama.IsInstalled() {
-			if err := ensureLlamaInstalled(); err != nil {
-				ui.Fatal("%v", err)
-			}
-		}
+		// Backend install is deferred until after model resolution so we
+		// only download the runtime we actually need (GGUF → llama.cpp,
+		// MLX → SwiftLM). See Step 2 below.
 
 		modelQuery := args[0]
 		promptStartIdx := 1 // Where prompt args begin (shifts if persona has no model)
@@ -107,6 +104,18 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 		// Step 2: Validate model exists (or offer to pull)
 		resolvedModel, err := validateModel(modelQuery, cfg)
 		if err != nil {
+			ui.Fatal("%v", err)
+		}
+
+		// Install the backend this specific model needs. validateModel may
+		// have just pulled it, so metadata is fresh and BackendKindForModelName
+		// returns the right kind.
+		kind := hf.BackendKindForModelName(resolvedModel.FullName)
+		need := neededBackends{
+			Llama:   kind == hf.BackendGGUF,
+			SwiftLM: kind == hf.BackendMLX,
+		}
+		if err := ensureBackends(need); err != nil {
 			ui.Fatal("%v", err)
 		}
 

@@ -68,13 +68,8 @@ Use --host, --port, and --max-models to override the values from config.`,
 		if err := validateServerFlags(); err != nil {
 			ui.Fatal("%v", err)
 		}
-		if !llama.IsInstalled() {
-			fmt.Println("Installing llama.cpp...")
-			fmt.Println()
-			if _, err := llama.InstallLatest(func(msg string) { fmt.Println(msg) }); err != nil {
-				ui.Fatal("Failed to install llama.cpp: %v", err)
-			}
-			fmt.Println()
+		if err := ensureBackends(backendsForLocalModels()); err != nil {
+			ui.Fatal("%v", err)
 		}
 	},
 	Run: func(cmd *cobra.Command, args []string) {
