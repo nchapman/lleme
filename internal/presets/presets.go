@@ -106,11 +106,13 @@ func Load() ([]*Preset, error) {
 	return presets, nil
 }
 
-// MergeServerOptions builds a server options map layered for the given
-// backend kind: preset shared → preset backend-specific → persona shared
-// → persona backend-specific. Later wins. Returns nil if every layer is
-// empty. kind should be hf.BackendGGUF or hf.BackendMLX; any other value
-// falls back to the shared layers only.
+// MergeServerOptions builds a server options map for the given backend kind.
+// It layers preset options (shared then backend-specific, via GetOptions)
+// under the caller-supplied personaOpts, which should already be resolved
+// for the same kind via Persona.GetServerOptions. Persona keys win on
+// conflict. Returns nil if both inputs are empty. kind should be
+// hf.BackendGGUF or hf.BackendMLX; any other value drops the preset's
+// backend-specific layer and uses its shared options only.
 func MergeServerOptions(preset *Preset, personaOpts map[string]any, kind string) map[string]any {
 	presetOpts := preset.GetOptions(kind)
 	if presetOpts == nil && personaOpts == nil {

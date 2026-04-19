@@ -532,3 +532,19 @@ func TestMergeServerOptionsLayering(t *testing.T) {
 		t.Errorf("ctx-size = %v, want 8192 (from persona)", got["ctx-size"])
 	}
 }
+
+// Persona backend-specific options (already folded into personaOpts by the
+// caller via Persona.GetServerOptions(kind)) must win over preset's own
+// backend-specific layer. This is the load-bearing guarantee of the four-
+// layer precedence.
+func TestMergeServerOptionsPersonaBackendOverridesPresetBackend(t *testing.T) {
+	p := &Preset{
+		LlamaCpp: PresetBackendSection{Options: map[string]any{"mirostat": 2}},
+	}
+	personaOpts := map[string]any{"mirostat": 1} // simulates persona.SwiftLM already merged
+
+	got := MergeServerOptions(p, personaOpts, "gguf")
+	if got["mirostat"] != 1 {
+		t.Errorf("mirostat = %v, want 1 (persona backend beats preset backend)", got["mirostat"])
+	}
+}
