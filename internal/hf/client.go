@@ -121,6 +121,18 @@ type Manifest struct {
 	SplitFiles []*ManifestFile `json:"splitFiles,omitempty"` // Additional split files (local augmentation)
 }
 
+// hfAllowedHosts is the set of hosts the HuggingFace download client is
+// permitted to contact, including the LFS CDN that huggingface.co redirects
+// to for large files. Any other host on a redirect chain fails closed.
+var hfAllowedHosts = map[string]bool{
+	"huggingface.co":          true,
+	"hf.co":                   true,
+	"cdn-lfs.huggingface.co":  true,
+	"cdn-lfs.hf.co":           true,
+	"cas-bridge.xethub.hf.co": true,
+	"cas-server.xethub.hf.co": true,
+}
+
 func NewClient(cfg *config.Config) *Client {
 	return &Client{
 		httpClient: &http.Client{
@@ -129,6 +141,21 @@ func NewClient(cfg *config.Config) *Client {
 		downloadClient: &http.Client{
 			Transport: &http.Transport{
 				ResponseHeaderTimeout: 30 * time.Second,
+			},
+			// Validate every redirect hop. Without this, a compromised HF
+			// response could 302 the download to an arbitrary host and the
+			// Authorization header would follow.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if !hfAllowedHosts[req.URL.Hostname()] {
+					return fmt.Errorf("redirect blocked: %s is not on the HuggingFace download allowlist", req.URL.Hostname())
+				}
+				if req.URL.Scheme != "https" {
+					return fmt.Errorf("redirect blocked: scheme %q is not https", req.URL.Scheme)
+				}
+				if len(via) >= 10 {
+					return fmt.Errorf("too many redirects")
+				}
+				return nil
 			},
 		},
 		token: getToken(cfg),

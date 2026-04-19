@@ -41,50 +41,27 @@ func NewDownloaderWithProgress(client *Client, progress ProgressCallback) *Downl
 	}
 }
 
-func (d *Downloader) DownloadModel(user, repo, branch, filename string, destPath string) (*DownloadProgress, error) {
-	url := fmt.Sprintf("%s/%s/%s/resolve/%s/%s", baseURL, user, repo, branch, filename)
-
+// DownloadModel streams a file from HuggingFace to destPath. expectedSize
+// (bytes) is the manifest-declared size; when non-zero it caps the total
+// bytes written at 2× the declared size as a defense against a misbehaving
+// or malicious backend streaming unbounded content. Zero disables the cap.
+func (d *Downloader) DownloadModel(user, repo, branch, filename, destPath string, expectedSize int64) (*DownloadProgress, error) {
 	partialPath := destPath + ".partial"
-	fileSize := int64(0)
+	existing := existingPartialSize(partialPath)
 
-	if info, err := os.Stat(partialPath); err == nil {
-		fileSize = info.Size()
-	}
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("User-Agent", version.UserAgent())
-	if d.client.token != "" {
-		req.Header.Set("Authorization", "Bearer "+d.client.token)
-	}
-
-	if fileSize > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", fileSize))
-	}
-
-	resp, err := d.client.downloadClient.Do(req)
+	resp, err := d.dispatchDownload(user, repo, branch, filename, existing)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	totalSize := existing + resp.ContentLength
+	sizeCap, err := enforceSizeCap(filename, expectedSize, totalSize)
+	if err != nil {
+		return nil, err
 	}
 
-	totalSize := fileSize + resp.ContentLength
-
-	flags := os.O_CREATE | os.O_WRONLY
-	if resp.StatusCode == http.StatusOK {
-		flags |= os.O_TRUNC
-	} else {
-		flags |= os.O_APPEND
-	}
-
-	file, err := os.OpenFile(partialPath, flags, 0644)
+	file, err := openDownloadFile(partialPath, resp.StatusCode)
 	if err != nil {
 		return nil, err
 	}
@@ -92,8 +69,90 @@ func (d *Downloader) DownloadModel(user, repo, branch, filename string, destPath
 
 	d.startTime = time.Now()
 	d.lastUpdate = d.startTime
-	d.lastBytes = fileSize
+	d.lastBytes = existing
 
+	written, err := d.streamBody(resp.Body, file, existing, totalSize, sizeCap)
+	if err != nil {
+		_ = file.Close()
+		_ = os.Remove(partialPath)
+		return nil, fmt.Errorf("download %s: %w", filename, err)
+	}
+
+	file.Close()
+	if err := os.Rename(partialPath, destPath); err != nil {
+		return nil, err
+	}
+	return d.calculateProgress(written, totalSize), nil
+}
+
+// existingPartialSize returns the current size of a .partial file, or 0 if
+// none exists. Nonzero values cause the request to resume with Range.
+func existingPartialSize(partialPath string) int64 {
+	if info, err := os.Stat(partialPath); err == nil {
+		return info.Size()
+	}
+	return 0
+}
+
+// dispatchDownload issues the GET request, resuming from existing bytes
+// via a Range header when nonzero. Returns the response for the caller to
+// stream. Non-2xx statuses are surfaced as an error.
+func (d *Downloader) dispatchDownload(user, repo, branch, filename string, existing int64) (*http.Response, error) {
+	url := fmt.Sprintf("%s/%s/%s/resolve/%s/%s", baseURL, user, repo, branch, filename)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", version.UserAgent())
+	if d.client.token != "" {
+		req.Header.Set("Authorization", "Bearer "+d.client.token)
+	}
+	if existing > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", existing))
+	}
+
+	resp, err := d.client.downloadClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		resp.Body.Close()
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return resp, nil
+}
+
+// enforceSizeCap computes the tolerated cap (2× expected + 1 MiB) and
+// fails fast when the declared Content-Length already exceeds it. Returns
+// the cap value (0 when disabled) so the streaming path can enforce the
+// streamed-bytes check against the same number.
+func enforceSizeCap(filename string, expectedSize, totalSize int64) (int64, error) {
+	if expectedSize <= 0 {
+		return 0, nil
+	}
+	cap := expectedSize*2 + (1 << 20)
+	if totalSize > cap {
+		return 0, fmt.Errorf("download %s: declared %d exceeds cap of %d (expected %d)", filename, totalSize, cap, expectedSize)
+	}
+	return cap, nil
+}
+
+// openDownloadFile opens the .partial file for the download, choosing
+// truncate vs. append based on whether we got a full or partial response.
+func openDownloadFile(partialPath string, statusCode int) (*os.File, error) {
+	flags := os.O_CREATE | os.O_WRONLY
+	if statusCode == http.StatusOK {
+		flags |= os.O_TRUNC
+	} else {
+		flags |= os.O_APPEND
+	}
+	return os.OpenFile(partialPath, flags, 0644)
+}
+
+// streamBody writes resp.Body to file, enforcing the per-file size cap via
+// LimitReader(cap+1) + post-stream byte count. A lying Content-Length
+// can't fill the disk because the LimitReader terminates at cap+1.
+func (d *Downloader) streamBody(body io.Reader, file io.Writer, existing, totalSize, sizeCap int64) (int64, error) {
 	var progressFn func(int64, int64)
 	if d.progress != nil {
 		progressFn = func(written, total int64) {
@@ -101,20 +160,17 @@ func (d *Downloader) DownloadModel(user, repo, branch, filename string, destPath
 			d.progress(p.Downloaded, p.Total, p.Speed, p.ETA)
 		}
 	}
-
-	written, err := fileutil.StreamBody(resp.Body, file, fileSize, totalSize, progressFn)
+	if sizeCap > 0 {
+		body = io.LimitReader(body, sizeCap+1)
+	}
+	written, err := fileutil.StreamBody(body, file, existing, totalSize, progressFn)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-
-	file.Close()
-
-	if err := os.Rename(partialPath, destPath); err != nil {
-		return nil, err
+	if sizeCap > 0 && written > sizeCap {
+		return 0, fmt.Errorf("exceeded size cap of %d bytes", sizeCap)
 	}
-
-	progress := d.calculateProgress(written, totalSize)
-	return progress, nil
+	return written, nil
 }
 
 func (d *Downloader) calculateProgress(downloaded, total int64) *DownloadProgress {

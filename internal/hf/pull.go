@@ -256,7 +256,7 @@ func downloadFromHF(client *Client, user, repo string, file *ManifestFile, destP
 		}
 	})
 
-	if _, err := downloader.DownloadModel(user, repo, "main", file.RFilename, destPath); err != nil {
+	if _, err := downloader.DownloadModel(user, repo, "main", file.RFilename, destPath, file.Size); err != nil {
 		return fmt.Errorf("download %s/%s %s: %w", user, repo, file.RFilename, err)
 	}
 	return nil

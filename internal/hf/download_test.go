@@ -311,6 +311,37 @@ func TestBackendKindRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEnforceSizeCap(t *testing.T) {
+	cases := []struct {
+		name                    string
+		expectedSize, totalSize int64
+		wantCap                 int64
+		wantErr                 string
+	}{
+		{"disabled when expectedSize=0", 0, 1_000_000_000_000, 0, ""},
+		{"well within tolerance", 1_000_000, 1_500_000, 2*1_000_000 + (1 << 20), ""},
+		{"exactly at tolerance boundary", 1_000_000, 1_000_000*2 + (1 << 20), 1_000_000*2 + (1 << 20), ""},
+		{"over tolerance rejected", 1_000_000, 1_000_000 * 4, 0, "exceeds cap"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cap, err := enforceSizeCap("x.bin", tc.expectedSize, tc.totalSize)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("err = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if cap != tc.wantCap {
+				t.Errorf("cap = %d, want %d", cap, tc.wantCap)
+			}
+		})
+	}
+}
+
 func TestGetBackendKindRejectsUnknown(t *testing.T) {
 	tmpDir := t.TempDir()
 	oldHome := os.Getenv("HOME")
