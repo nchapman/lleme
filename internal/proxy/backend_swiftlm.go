@@ -115,6 +115,15 @@ var swiftlmBoolFlags = map[string]string{
 	"calibrate":      "--calibrate",
 }
 
+// TODO(backend-parity): Template patching is currently llama.cpp-only via
+// ExtractAndPatchTemplate (see backend_llama.go). SwiftLM reads
+// chat_template.jinja directly from the MLX repo directory with no CLI
+// override, so we cannot inject a patched template today. MLX variants of
+// models whose Jinja templates trip llama-server's known issues (e.g. the
+// empty tools array handling in proxy/template.go) will produce degraded
+// tool-call output. Revisit when SwiftLM grows a --chat-template-file flag
+// or we ship an inline template-rewriting pass that writes a sibling file
+// SwiftLM picks up before loading.
 func (r *SwiftLMRuntime) BuildArgs(backend *Backend, host string) []string {
 	args := []string{
 		"--model", backend.ModelPath,
