@@ -534,6 +534,20 @@ func (s *streamState) ensureStarted() error {
 // been emitted; the stream loop should stop cleanly.
 var errStreamAborted = fmt.Errorf("stream aborted by upstream error")
 
+// emitError writes a synthetic Anthropic `event: error` frame. Used for
+// conditions the upstream didn't report as a structured error but that we
+// still want the SDK to see — e.g. a mid-stream I/O failure on the
+// upstream connection.
+func (s *streamState) emitError(errType, message string) error {
+	return s.writeEvent("error", map[string]any{
+		"type": "error",
+		"error": map[string]string{
+			"type":    errType,
+			"message": message,
+		},
+	})
+}
+
 func (s *streamState) applyChunk(chunk *openAIStreamChunk) error {
 	// Upstream signaled an error mid-stream. Translate to Anthropic's
 	// `event: error` and stop — further chunks would be semantically
@@ -620,40 +634,65 @@ func (s *streamState) finalize() error {
 // messageID is stamped into the emitted events; model is echoed back.
 // The writer must be an http.ResponseWriter configured for streaming; the
 // caller is responsible for flushing response headers first.
+//
+// Uses bufio.Reader.ReadBytes instead of bufio.Scanner because Scanner has
+// a hard token-length cap (defaults to 64 KiB; even raising it to 1 MiB is
+// fragile). A single `data:` line from a reasoning model or a tool-call
+// backend can exceed any static limit; silently dropping the rest of the
+// stream is the worst outcome. Each line is read as an independent
+// allocation, bounded only by Go's memory, and any I/O error that happens
+// mid-stream gets surfaced as a synthetic Anthropic error event instead of
+// a silent truncation.
 func translateAnthropicStream(w io.Writer, upstream io.Reader, messageID, model string) error {
 	state := newStreamState(w, messageID, model)
+	reader := bufio.NewReader(upstream)
 
-	scanner := bufio.NewScanner(upstream)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" || payload == "[DONE]" {
-			continue
-		}
-		var chunk openAIStreamChunk
-		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			// Skip malformed chunks rather than aborting the whole stream.
-			continue
-		}
-		if err := state.applyChunk(&chunk); err != nil {
-			if errors.Is(err, errStreamAborted) {
-				// Error event already emitted; don't tack on trailing
-				// message_delta/message_stop frames that would confuse
-				// the client about the final state.
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			if stop, handleErr := handleStreamLine(state, line); handleErr != nil {
+				return handleErr
+			} else if stop {
 				return nil
 			}
+		}
+		if err == io.EOF {
+			return state.finalize()
+		}
+		if err != nil {
+			// Mid-stream I/O error: emit an error frame so SDK consumers see
+			// an explicit failure instead of a stream that just stops.
+			_ = state.emitError("api_error", fmt.Sprintf("upstream stream error: %v", err))
 			return err
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return err
+}
+
+// handleStreamLine processes one SSE line. Returns (stop=true, nil) when
+// an upstream error event already emitted an Anthropic error frame and the
+// caller should return cleanly without tacking on trailing message_delta /
+// message_stop frames.
+func handleStreamLine(state *streamState, line []byte) (bool, error) {
+	trimmed := bytes.TrimRight(line, "\r\n")
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return false, nil
 	}
-	return state.finalize()
+	payload := bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("data:")))
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+		return false, nil
+	}
+	var chunk openAIStreamChunk
+	if err := json.Unmarshal(payload, &chunk); err != nil {
+		// Skip malformed chunks rather than aborting the whole stream.
+		return false, nil
+	}
+	if err := state.applyChunk(&chunk); err != nil {
+		if errors.Is(err, errStreamAborted) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
 }
 
 // --- Token counting ---

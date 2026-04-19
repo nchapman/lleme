@@ -339,7 +339,10 @@ func BackendKindForModelName(fullName string) string {
 // GetBackendKind returns the recorded backend kind for a quant. A missing
 // metadata file or an empty `backend:` field resolves to "gguf" (the only
 // format lleme supported before MLX). I/O and parse errors are propagated
-// so callers can surface them instead of silently falling back.
+// so callers can surface them instead of silently falling back. Any
+// unrecognized backend string in the file is an error — metadata.yaml is
+// local, but corrupt / tampered content shouldn't silently dispatch to a
+// default runtime.
 func GetBackendKind(user, repo, quant string) (string, error) {
 	meta, err := LoadMetadata(user, repo)
 	if err != nil {
@@ -349,7 +352,18 @@ func GetBackendKind(user, repo, quant string) (string, error) {
 	if !ok || q.Backend == "" {
 		return BackendGGUF, nil
 	}
-	return q.Backend, nil
+	return parseBackendKind(q.Backend)
+}
+
+// parseBackendKind accepts only the known kinds. Keeps the on-disk
+// vocabulary narrow so downstream switches don't have to re-validate.
+func parseBackendKind(s string) (string, error) {
+	switch s {
+	case BackendGGUF, BackendMLX:
+		return s, nil
+	default:
+		return "", fmt.Errorf("unrecognized backend kind %q", s)
+	}
 }
 
 // TouchLastUsed updates the last used timestamp for a model.

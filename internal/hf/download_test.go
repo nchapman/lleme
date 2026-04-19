@@ -3,6 +3,7 @@ package hf
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -307,6 +308,28 @@ func TestBackendKindRoundTrip(t *testing.T) {
 	}
 	if got != BackendGGUF {
 		t.Errorf("empty field kind = %q, want %q", got, BackendGGUF)
+	}
+}
+
+func TestGetBackendKindRejectsUnknown(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", oldHome)
+	os.Setenv("HOME", tmpDir)
+
+	user, repo, quant := "u", "r", "q"
+	if err := os.MkdirAll(GetModelPath(user, repo), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Manually plant a corrupt / tampered metadata.yaml with an unknown
+	// backend kind. Reading it must error rather than silently dispatch.
+	yaml := "quants:\n  q:\n    backend: evil\n"
+	if err := os.WriteFile(GetMetadataPath(user, repo), []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := GetBackendKind(user, repo, quant)
+	if err == nil || !strings.Contains(err.Error(), "unrecognized backend kind") {
+		t.Errorf("err = %v, want unrecognized backend kind", err)
 	}
 }
 

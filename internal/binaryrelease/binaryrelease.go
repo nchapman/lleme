@@ -277,26 +277,27 @@ func ExtractTarGz(archivePath, destDir string) error {
 	}
 }
 
-// safeJoin returns absDest/rel, guaranteed to live under absDest. Rejects
-// absolute entry names, .. traversal, and any path that lexically or via
-// symlink resolution escapes absDest.
-func safeJoin(absDest, name string) (string, error) {
+// SafeJoin returns absDest/rel, guaranteed to live under absDest. Rejects
+// absolute entry names, .. traversal, and any path that lexically escapes
+// absDest. Used by ExtractTarGz and by callers (e.g. hf.PullMLXModel) that
+// need to join an attacker-influenced relative path onto a local root.
+func SafeJoin(absDest, name string) (string, error) {
 	clean := filepath.Clean(name)
 	if filepath.IsAbs(clean) {
-		return "", fmt.Errorf("archive entry %q has absolute path", name)
+		return "", fmt.Errorf("path %q is absolute", name)
 	}
 	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("archive entry %q escapes destination", name)
+		return "", fmt.Errorf("path %q escapes destination", name)
 	}
 	joined := filepath.Join(absDest, clean)
 	if joined != absDest && !strings.HasPrefix(joined, absDest+string(filepath.Separator)) {
-		return "", fmt.Errorf("archive entry %q escapes destination", name)
+		return "", fmt.Errorf("path %q escapes destination", name)
 	}
 	return joined, nil
 }
 
 func extractEntry(tr *tar.Reader, hdr *tar.Header, absDest string) error {
-	target, err := safeJoin(absDest, hdr.Name)
+	target, err := SafeJoin(absDest, hdr.Name)
 	if err != nil {
 		return err
 	}
@@ -327,13 +328,22 @@ func writeTarFile(tr *tar.Reader, hdr *tar.Header, target string, mode os.FileMo
 	}
 	// Cap the per-entry copy so an inflated gzip bomb can't fill disk.
 	// hdr.Size<=0 means "unknown/empty"; clamp to a generous 8 GiB ceiling.
+	// Use LimitReader(limit+1)+io.Copy so a source that exactly matches the
+	// cap — and has leftover bytes that would bleed into the next tar entry
+	// — is rejected. io.CopyN can't distinguish "source ended at limit" from
+	// "source has more than limit," which would corrupt subsequent files.
 	limit := hdr.Size
 	if limit <= 0 || limit > 1<<33 {
 		limit = 1 << 33
 	}
-	if _, err := io.CopyN(out, tr, limit); err != nil && err != io.EOF {
+	written, err := io.Copy(out, io.LimitReader(tr, limit+1))
+	if err != nil {
 		out.Close()
 		return fmt.Errorf("write %s: %w", hdr.Name, err)
+	}
+	if written > limit {
+		out.Close()
+		return fmt.Errorf("archive entry %s exceeded size limit of %d bytes", hdr.Name, limit)
 	}
 	return out.Close()
 }

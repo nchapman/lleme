@@ -103,6 +103,12 @@ func listRepoQuants(modelsDir, user, repo string) []LocalModel {
 			kind := q.Backend
 			if kind == "" {
 				kind = BackendGGUF
+			} else if validated, err := parseBackendKind(kind); err == nil {
+				kind = validated
+			} else {
+				// Unknown backend in metadata — skip rather than list with a
+				// bogus kind that downstream callers would have to guess at.
+				continue
 			}
 			if m, ok := resolveLocalModel(repoDir, user, repo, quant, kind, q.LastUsed); ok {
 				out = append(out, m)

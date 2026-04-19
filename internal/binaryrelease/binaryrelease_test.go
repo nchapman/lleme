@@ -264,6 +264,25 @@ func TestExtractTarGzRejectsEscapingSymlink(t *testing.T) {
 	}
 }
 
+// Baseline: an archive whose declared sizes match their payloads must
+// extract cleanly under the new io.Copy(LimitReader(limit+1)) code path
+// — guards against a regression where the `written > limit` check trips
+// on exact matches.
+func TestExtractTarGzMatchedSize(t *testing.T) {
+	payload := strings.Repeat("A", 1024)
+	arc := writeTarGz(t, []tarEntry{
+		{typ: tar.TypeReg, name: "exact", body: payload},
+	})
+	dest := t.TempDir()
+	if err := ExtractTarGz(arc, dest); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "exact"))
+	if err != nil || string(got) != payload {
+		t.Errorf("content mismatch: %d bytes err=%v", len(got), err)
+	}
+}
+
 func TestExtractTarGzRejectsAbsoluteSymlink(t *testing.T) {
 	arc := writeTarGz(t, []tarEntry{
 		{typ: tar.TypeSymlink, name: "link", linkname: "/etc/passwd"},

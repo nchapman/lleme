@@ -105,6 +105,29 @@ func TestVersionInfoRoundTrip(t *testing.T) {
 	}
 }
 
+// SaveVersionInfo must not leave a stray .tmp sibling behind on success.
+// Crash-window behavior (tmp survives a mid-write kill) is tested
+// implicitly — if a .tmp ever ends up where the real file should be, the
+// next GetInstalledVersion would reject it as unparseable.
+func TestSaveVersionInfoIsAtomic(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", oldHome)
+	os.Setenv("HOME", tmpDir)
+
+	info := &VersionInfo{TagName: "b999", BinaryPath: "/fake", InstalledAt: "now"}
+	if err := SaveVersionInfo(info); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(tmpDir, ".lleme", "bin")
+	if _, err := os.Stat(filepath.Join(binDir, "swiftlm-version.json.tmp")); !os.IsNotExist(err) {
+		t.Errorf("leftover .tmp sibling after SaveVersionInfo: err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(binDir, "swiftlm-version.json")); err != nil {
+		t.Errorf("final version file missing: %v", err)
+	}
+}
+
 func TestPruneOldVersionsKeepsCurrentAndSymlinkTarget(t *testing.T) {
 	tmpDir := t.TempDir()
 	dirs := []string{"SwiftLM-b1-macos-arm64", "SwiftLM-b2-macos-arm64", "SwiftLM-b3-macos-arm64"}

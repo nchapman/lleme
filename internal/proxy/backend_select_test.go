@@ -31,7 +31,7 @@ func TestSelectRuntime(t *testing.T) {
 		{"legacy empty defaults to gguf", "q_legacy", "", "", BackendKindLlama},
 		{"gguf returns llama runtime", "q_gguf", hf.BackendGGUF, "", BackendKindLlama},
 		{"mlx returns swiftlm runtime", "q_mlx", hf.BackendMLX, "", BackendKindMLX},
-		{"unknown kind errors", "q_bogus", "bogus", "unknown backend kind", ""},
+		{"unknown kind errors", "q_bogus", "bogus", "unrecognized backend kind", ""},
 	}
 
 	for _, tt := range tests {

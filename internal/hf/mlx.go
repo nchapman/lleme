@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/nchapman/lleme/internal/binaryrelease"
 )
 
 // mlxQuantSuffix matches the quantization suffix on mlx-community repos
@@ -131,8 +133,21 @@ func PullMLXModel(client *Client, user, repo, quant string, progress func(PullPr
 		downloaded int64
 		written    []string
 	)
+	absDest, err := filepath.Abs(destDir)
+	if err != nil {
+		cleanupMLX(dirExisted, destDir, written)
+		return nil, fmt.Errorf("resolve destination: %w", err)
+	}
 	for _, f := range mlxFiles {
-		destPath := filepath.Join(destDir, f.Path)
+		// f.Path comes verbatim from the HuggingFace tree API — an attacker
+		// who controls the repo can return "../../.ssh/id_rsa". SafeJoin
+		// refuses absolute paths, .. traversal, and any join that escapes
+		// the model directory.
+		destPath, err := binaryrelease.SafeJoin(absDest, f.Path)
+		if err != nil {
+			cleanupMLX(dirExisted, destDir, written)
+			return nil, fmt.Errorf("reject MLX file %q: %w", f.Path, err)
+		}
 		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 			cleanupMLX(dirExisted, destDir, written)
 			return nil, fmt.Errorf("failed to create subdir for %s: %w", f.Path, err)

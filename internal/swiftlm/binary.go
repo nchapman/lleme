@@ -273,7 +273,18 @@ func SaveVersionInfo(info *VersionInfo) error {
 	if err != nil {
 		return fmt.Errorf("marshal version: %w", err)
 	}
-	return os.WriteFile(versionFilePath(), data, 0644)
+	// Write + rename so a concurrent update or a crash mid-write can't leave
+	// a truncated file that GetInstalledVersion would fail to unmarshal.
+	path := versionFilePath()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("activate %s: %w", path, err)
+	}
+	return nil
 }
 
 // GetInstalledVersion reads the installed-version metadata, returning

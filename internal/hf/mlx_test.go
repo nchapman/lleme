@@ -1,6 +1,7 @@
 package hf
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -120,6 +121,20 @@ func TestListMLXFiles(t *testing.T) {
 		if !wantPaths[f.Path] {
 			t.Errorf("unexpected file in output: %s", f.Path)
 		}
+	}
+}
+
+// Path-traversal guard is enforced in PullMLXModel via binaryrelease.SafeJoin.
+// The behavior is covered by binaryrelease's own TestExtractTarGzRejects*
+// suite; here we just pin that the guard exists at the MLX call site so a
+// refactor can't accidentally regress it to a bare filepath.Join.
+func TestPullMLXModelUsesSafeJoin(t *testing.T) {
+	data, err := os.ReadFile("mlx.go")
+	if err != nil {
+		t.Fatalf("read mlx.go: %v", err)
+	}
+	if !strings.Contains(string(data), "binaryrelease.SafeJoin") {
+		t.Error("PullMLXModel must route HF-sourced paths through binaryrelease.SafeJoin")
 	}
 }
 
