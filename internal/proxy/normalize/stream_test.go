@@ -200,11 +200,16 @@ func canonicalizeSSE(t *testing.T, s string) string {
 				out.WriteString(trimmed + "\n")
 				continue
 			}
-			var v any
+			var v map[string]any
 			if err := json.Unmarshal([]byte(payload), &v); err != nil {
 				out.WriteString(trimmed + "\n")
 				continue
 			}
+			// Timings is intentionally non-idempotent: the contract is
+			// "always overwrite with current proxy-side measurement"
+			// so cross-backend numbers are comparable. Strip it
+			// before comparison — every other field must round-trip.
+			delete(v, "timings")
 			b, _ := json.Marshal(v)
 			out.WriteString("data: " + string(b) + "\n")
 			continue

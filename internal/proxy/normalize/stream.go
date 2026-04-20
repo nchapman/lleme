@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"time"
 )
 
 // streamReader is an SSE-aware io.ReadCloser. It pulls one frame
@@ -24,6 +25,12 @@ type streamReader struct {
 	out    bytes.Buffer
 	done   bool
 	err    error
+
+	// timings state — captured on the first content-bearing frame
+	// and used to synthesize predicted_per_second on the chunk that
+	// carries usage. See applyTimings for the contract details.
+	firstContentAt time.Time
+	sawFirstChunk  bool
 }
 
 func newStreamReader(r io.Reader, opts Options) *streamReader {
@@ -176,9 +183,19 @@ func (s *streamReader) emitFrame(lines [][]byte) error {
 	}
 
 	if !applyChunkNormalizers(obj, s.opts) {
-		// Frame dropped (prefill_progress). Emit nothing.
+		// Frame dropped (prefill_progress). Emit nothing — and don't
+		// advance the timing clock either, since dropped frames
+		// represent backend work the user can't see.
 		return nil
 	}
+
+	// Stateful timings synthesis runs after the stateless passes:
+	// markFirstContent anchors the clock to the first visible
+	// decoded token, applyTimings injects predicted_per_second on
+	// the chunk that carries usage. Always-overwrite — see
+	// timings.go for the contract rationale.
+	s.markFirstContent(obj)
+	s.applyTimings(obj)
 
 	encoded, err := json.Marshal(obj)
 	if err != nil {
