@@ -176,19 +176,19 @@ func isKnownBackendProcess(pid int) bool {
 }
 
 // cmdlineMatchesBackend checks whether the given process command name
-// belongs to one of our backends.
-//
-// llama-server uses substring match because the process may appear under
-// shell wrappers on some installations (retaining the pre-SwiftLM posture).
-// SwiftLM uses exact-basename match after trimming whitespace — its name is
-// short enough that substring matching risks false positives against
-// user-named binaries (e.g. `MySwiftLMWrapper`) and the SwiftLM binary
-// always executes directly, so exact match is tight and sufficient.
+// belongs to one of our backends. `ps -o comm=` returns the executable's
+// basename, so exact-match is sufficient and safest: a reused PID whose
+// new process merely contains `llama-server` as a substring (wrapper
+// scripts, user binaries like `MyLlamaServerTool`) won't be misidentified
+// as ours. We always exec our own binaries directly via llama.ServerPath()
+// / swiftlm.ServerPath(), so comm is always one of these exact values.
 func cmdlineMatchesBackend(cmdline string) bool {
-	if strings.Contains(cmdline, "llama-server") || strings.Contains(cmdline, "llama_server") {
+	comm := strings.TrimSpace(cmdline)
+	switch comm {
+	case "llama-server", "llama_server", "SwiftLM":
 		return true
 	}
-	return strings.TrimSpace(cmdline) == "SwiftLM"
+	return false
 }
 
 // killProcess sends SIGTERM, waits briefly, then SIGKILL if needed

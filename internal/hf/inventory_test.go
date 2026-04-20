@@ -77,6 +77,37 @@ func TestListLocalModelsMixedBackends(t *testing.T) {
 	}
 }
 
+// Regression: MLX repos preserve the HuggingFace tree layout, so files
+// can sit under nested paths (e.g. snapshots/<rev>/model.safetensors).
+// dirSize must walk recursively or the reported model size undercounts.
+func TestListLocalModelsMLXNestedSizeRecursive(t *testing.T) {
+	modelsDir := t.TempDir()
+
+	repoDir := filepath.Join(modelsDir, "mlx-community", "nested-repo")
+	quantDir := filepath.Join(repoDir, "4bit")
+	// Flat files (tokenizer/config) at the quant root.
+	writeFile(t, filepath.Join(quantDir, "config.json"), 100)
+	writeFile(t, filepath.Join(quantDir, "tokenizer.json"), 200)
+	// Nested weight shard under a snapshots/<rev>/ tree, like HF serves.
+	writeFile(t, filepath.Join(quantDir, "snapshots", "abc123", "model.safetensors"), 5000)
+	writeFile(t, filepath.Join(quantDir, "snapshots", "abc123", "model.safetensors.index.json"), 300)
+
+	_ = os.WriteFile(filepath.Join(repoDir, "metadata.yaml"),
+		[]byte("quants:\n  4bit:\n    backend: mlx\n"), 0644)
+
+	got, err := ListLocalModelsInDir(modelsDir)
+	if err != nil {
+		t.Fatalf("ListLocalModelsInDir: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 model, got %d: %+v", len(got), got)
+	}
+	const wantSize = int64(100 + 200 + 5000 + 300)
+	if got[0].Size != wantSize {
+		t.Errorf("MLX nested size = %d, want %d (flat+nested files)", got[0].Size, wantSize)
+	}
+}
+
 func TestListLocalModelsEmpty(t *testing.T) {
 	dir := t.TempDir()
 	got, err := ListLocalModelsInDir(dir)

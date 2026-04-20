@@ -215,23 +215,27 @@ func hasGGUFInside(dir string) bool {
 	return false
 }
 
-// dirSize sums the sizes of regular files directly inside dir (non-recursive).
-// Both GGUF split trees and MLX trees are flat, so recursive walking would
-// just be overhead.
+// dirSize recursively sums the sizes of every regular file under dir.
+// GGUF split trees are flat, but MLX pulls preserve the HuggingFace tree
+// layout (e.g. `snapshots/<rev>/config.json`) via binaryrelease.SafeJoin,
+// so a flat scan would undercount MLX model sizes in list / remove / status
+// output. Symlinks are not followed; unreadable entries are skipped.
 func dirSize(dir string) int64 {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0
-	}
 	var total int64
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
 		}
-		if info, err := e.Info(); err == nil {
-			total += info.Size()
+		if !d.Type().IsRegular() {
+			return nil
 		}
-	}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
 	return total
 }
 

@@ -209,23 +209,33 @@ func TestIsProcessRunning(t *testing.T) {
 }
 
 func TestCmdlineMatchesBackend(t *testing.T) {
+	// Inputs here match the shape `ps -o comm=` actually produces: the
+	// executable basename followed by a trailing newline, no arguments.
+	// Exact-basename match is what the implementation (and our threat model
+	// around PID reuse) requires; the old fixtures modeling /proc/cmdline's
+	// null-separated arg vector didn't reflect real ps output.
 	tests := []struct {
 		name     string
 		cmdline  string
 		expected bool
 	}{
 		{
-			name:     "llama-server in path",
-			cmdline:  "/usr/bin/llama-server\x00--model\x00test.gguf",
+			name:     "llama-server basename from ps",
+			cmdline:  "llama-server\n",
 			expected: true,
 		},
 		{
-			name:     "llama_server with underscore",
-			cmdline:  "/opt/llama_server\x00--port\x0049152",
+			name:     "llama_server underscore variant",
+			cmdline:  "llama_server\n",
 			expected: true,
 		},
 		{
-			name:     "SwiftLM via ps -o comm= (basename + newline)",
+			name:     "llama-server no trailing whitespace",
+			cmdline:  "llama-server",
+			expected: true,
+		},
+		{
+			name:     "SwiftLM basename from ps",
 			cmdline:  "SwiftLM\n",
 			expected: true,
 		},
@@ -235,24 +245,24 @@ func TestCmdlineMatchesBackend(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "llama-server substring must not false-positive",
+			cmdline:  "MyLlamaServerWrapper\n",
+			expected: false,
+		},
+		{
 			name:     "SwiftLM substring must not false-positive",
 			cmdline:  "MySwiftLMWrapper\n",
 			expected: false,
 		},
 		{
 			name:     "different process",
-			cmdline:  "/usr/bin/python\x00script.py",
+			cmdline:  "python\n",
 			expected: false,
 		},
 		{
 			name:     "empty cmdline",
 			cmdline:  "",
 			expected: false,
-		},
-		{
-			name:     "llama-server as argument",
-			cmdline:  "/bin/sh\x00-c\x00llama-server --model test",
-			expected: true,
 		},
 	}
 

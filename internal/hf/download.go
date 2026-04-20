@@ -123,19 +123,42 @@ func (d *Downloader) dispatchDownload(user, repo, branch, filename string, exist
 	return resp, nil
 }
 
-// enforceSizeCap computes the tolerated cap (2× expected + 1 MiB) and
+// sizeCapSlackBytes is the additive slack on top of 2× the declared size.
+// Covers minor server-side re-packing (shard boundary bytes, metadata
+// shuffles) without needing a precise match.
+const sizeCapSlackBytes = 1 << 20 // 1 MiB
+
+// maxExpectedSize is the largest declared size we'll accept before refusing
+// the download outright. Two reasons for the clamp:
+//  1. Overflow safety — `expectedSize*2 + slack` must stay within int64, and
+//     `sizeCap+1` (used by the LimitReader in streamBody) must too. Anything
+//     below (MaxInt64 − slack) / 2 is safe on both counts.
+//  2. Sanity — no model file legitimately approaches 4 EiB. A manifest
+//     claiming otherwise is malicious or corrupt; failing fast is better
+//     than trying to be clever. 1 TiB covers real LLM shards with 1000×
+//     headroom against today's largest open-weight models.
+const maxExpectedSize int64 = 1 << 40 // 1 TiB
+
+// enforceSizeCap computes the tolerated cap (2× expected + slack) and
 // fails fast when the declared Content-Length already exceeds it. Returns
 // the cap value (0 when disabled) so the streaming path can enforce the
-// streamed-bytes check against the same number.
+// streamed-bytes check against the same number. Refuses pathological
+// expectedSize values to keep the arithmetic and the LimitReader(cap+1)
+// bound inside int64.
 func enforceSizeCap(filename string, expectedSize, totalSize int64) (int64, error) {
 	if expectedSize <= 0 {
 		return 0, nil
 	}
-	cap := expectedSize*2 + (1 << 20)
-	if totalSize > cap {
-		return 0, fmt.Errorf("download %s: declared %d exceeds cap of %d (expected %d)", filename, totalSize, cap, expectedSize)
+	if expectedSize > maxExpectedSize {
+		return 0, fmt.Errorf("download %s: declared size %d exceeds sanity limit %d", filename, expectedSize, maxExpectedSize)
 	}
-	return cap, nil
+	// Safe from overflow because expectedSize ≤ maxExpectedSize (2^40);
+	// 2×2^40 + 1 MiB is well under MaxInt64 (~9.2×10^18).
+	sizeCap := expectedSize*2 + sizeCapSlackBytes
+	if totalSize > sizeCap {
+		return 0, fmt.Errorf("download %s: declared %d exceeds cap of %d (expected %d)", filename, totalSize, sizeCap, expectedSize)
+	}
+	return sizeCap, nil
 }
 
 // openDownloadFile opens the .partial file for the download, choosing

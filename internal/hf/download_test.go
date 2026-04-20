@@ -322,6 +322,11 @@ func TestEnforceSizeCap(t *testing.T) {
 		{"well within tolerance", 1_000_000, 1_500_000, 2*1_000_000 + (1 << 20), ""},
 		{"exactly at tolerance boundary", 1_000_000, 1_000_000*2 + (1 << 20), 1_000_000*2 + (1 << 20), ""},
 		{"over tolerance rejected", 1_000_000, 1_000_000 * 4, 0, "exceeds cap"},
+		// Pathological expectedSize rejected before arithmetic — guards
+		// against int64 overflow in `expectedSize*2 + slack` and the
+		// downstream LimitReader(sizeCap+1) bound.
+		{"expectedSize above sanity limit rejected", maxExpectedSize + 1, 0, 0, "sanity limit"},
+		{"expectedSize at MaxInt64 rejected", 1<<62 + 1, 0, 0, "sanity limit"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
