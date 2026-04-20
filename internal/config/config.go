@@ -157,6 +157,17 @@ func DefaultConfig() *Config {
 			DefaultQuant: "Q4_K_M",
 		},
 		LlamaCpp: LlamaCpp{},
+		// SwiftLM defaults `thinking` ON to match llama.cpp's
+		// out-of-the-box behavior. llama-server defaults to
+		// `--reasoning-format auto`, which extracts <think>...</think>
+		// blocks into reasoning_content. Without this default, MLX
+		// users see raw <think> tags in content and clients that key
+		// on reasoning_content (TUI, Anthropic translator) lose the
+		// reasoning split. Users can disable per-config or via the
+		// `--thinking=false` flag.
+		SwiftLM: SwiftLM{
+			Options: map[string]any{"thinking": true},
+		},
 		Server: Server{
 			Host:           "127.0.0.1",
 			Port:           11313,
@@ -247,7 +258,16 @@ swiftlm:
   # there.
   # auto_update: true
 
-  # options:
+  options:
+    # --- Mode toggles ---
+    # 'thinking' is on by default for parity with llama.cpp, which
+    # parses <think>...</think> into reasoning_content out of the
+    # box (--reasoning-format auto). Set to false to pass <think>
+    # tags through verbatim as content.
+    thinking: true
+    # vision: false            # Enable VLM (image inputs)
+    # audio: false             # Enable ALM (audio inputs)
+
     # --- Core ---
     # ctx-size: 8192           # Context window (KV cache)
     # max-tokens: 2048         # Default max tokens per request
@@ -260,11 +280,6 @@ swiftlm:
     # top-k: 50                # Top-k (0 = disabled)
     # min-p: 0.0               # Min-p sampling
     # repeat-penalty: 1.0      # Repetition penalty
-
-    # --- Mode toggles ---
-    # thinking: false          # Qwen3.5-style reasoning mode
-    # vision: false            # Enable VLM (image inputs)
-    # audio: false             # Enable ALM (audio inputs)
 `
 
 func Load() (*Config, error) {
