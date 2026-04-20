@@ -7,6 +7,7 @@ import (
 
 	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/hf"
+	"github.com/nchapman/lleme/internal/swiftlm"
 	"github.com/nchapman/lleme/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -57,6 +58,17 @@ Examples:
 		files, err := client.ListFiles(user, repo, "main")
 		if err != nil {
 			ui.Fatal("Failed to list files: %v", err)
+		}
+
+		switch hf.DetectFormat(files) {
+		case hf.BackendMLX:
+			pullMLX(client, user, repo, quant)
+			return
+		case "":
+			ui.PrintError("No supported model files found")
+			fmt.Printf("\nThe repository '%s/%s' does not contain GGUF files or MLX weights.\n", user, repo)
+			ui.ExitFunc(1)
+			return
 		}
 
 		quants := hf.ExtractQuantizations(files)
@@ -121,6 +133,64 @@ Examples:
 			fmt.Printf("Pulled %s\n", modelName)
 		}
 	},
+}
+
+// pullMLX handles the MLX branch: quant is inferred from the repo name when
+// not supplied, the entire repo is downloaded into a per-quant directory,
+// and metadata.yaml is updated with backend=mlx.
+func pullMLX(client *hf.Client, user, repo, quant string) {
+	if !swiftlm.IsSupported() {
+		ui.PrintError("MLX models require macOS on Apple Silicon")
+		fmt.Fprintln(os.Stderr, "\nThis repository contains MLX weights, which only run under SwiftLM on darwin/arm64.")
+		fmt.Fprintln(os.Stderr, "On other platforms, pull a GGUF repo (e.g. a bartowski/* or unsloth/* release).")
+		ui.ExitFunc(1)
+		return
+	}
+
+	// Install SwiftLM now if it's missing — pulling an MLX model with no
+	// runtime to serve it would be a dead end.
+	if !swiftlm.IsInstalled() {
+		fmt.Println("Installing SwiftLM...")
+		if _, err := swiftlm.InstallLatest(func(msg string) { fmt.Println(msg) }); err != nil {
+			ui.Fatal("Failed to install SwiftLM: %v", err)
+		}
+		fmt.Println()
+	}
+
+	if quant == "" {
+		quant = hf.MLXQuantFromRepo(repo)
+	}
+
+	modelName := ui.Keyword(hf.FormatModelName(user, repo, quant))
+
+	// Freshness: skip re-download when every file already matches remote
+	// size. Mirrors the GGUF CheckForUpdates branch above the switch.
+	upToDate, saveManifest, remoteFiles, err := hf.CheckForUpdatesMLX(client, user, repo, quant)
+	if err != nil {
+		ui.Fatal("%v", err)
+	}
+	if upToDate {
+		if saveManifest {
+			// Legacy pull without a manifest — persist one now so the next
+			// check is a cheap JSON compare.
+			if err := hf.SaveMLXManifest(user, repo, quant, remoteFiles); err != nil {
+				ui.Fatal("Failed to save MLX manifest: %v", err)
+			}
+		}
+		fmt.Printf("%s is already up to date\n", modelName)
+		return
+	}
+
+	fmt.Printf("Pulling %s (MLX)\n", modelName)
+
+	result, err := hf.PullMLXModelWithProgress(client, user, repo, quant, newProgressBar)
+	if err != nil {
+		ui.Fatal("%v", err)
+	}
+
+	fmt.Printf("Pulled %s (%s)\n",
+		hf.FormatModelName(user, repo, quant),
+		ui.FormatBytes(result.TotalSize))
 }
 
 // pullModelWithProgress wraps hf.PullModel with progress bar display.

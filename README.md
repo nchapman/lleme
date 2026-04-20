@@ -33,7 +33,7 @@ cd lleme
 go build -o lleme .
 ```
 
-`llama.cpp` is downloaded and installed automatically on first run.
+`llama.cpp` is downloaded and installed automatically on first run. On Apple Silicon, [SwiftLM](https://github.com/SharpAI-Lab/SwiftLM) is also auto-installed the first time you pull an MLX model (see [Backends](#backends) below).
 
 ## Quickstart
 
@@ -54,6 +54,26 @@ cat bug-report.md | lleme run unsloth/gemma-4-E2B-it-GGUF "summarize this"
 ```
 
 Partial names resolve automatically — `lleme run gemma-4` matches `unsloth/gemma-4-E2B-it-GGUF:Q4_K_M` as long as the name is unique. (The `:quant` suffix selects a specific quantization; omit it and lleme picks the best one available locally.)
+
+## Backends
+
+lleme runs models through one of two inference backends, picked automatically from the model's repo:
+
+- **`llama.cpp`** (GGUF) — **recommended.** Cross-platform, Metal/Vulkan/CUDA acceleration, supports every architecture llama.cpp does.
+- **MLX** via [SwiftLM](https://github.com/SharpAI-Lab/SwiftLM) — **experimental**, Apple Silicon only. Native MLX inference for any MLX-format repo on Hugging Face.
+
+```bash
+lleme run mlx-community/Qwen3.6-35B-A3B-mxfp4    # MLX (Apple Silicon)
+lleme run unsloth/gemma-4-E2B-it-GGUF            # GGUF (everywhere)
+```
+
+Both backends share the same proxy, OpenAI/Anthropic surface, persona system, and config. The MLX path is marked experimental because:
+
+- SwiftLM is younger than llama.cpp and has narrower model coverage.
+- Some output normalization (e.g. gpt-oss harmony channel parsing) is unimplemented upstream — raw `<|channel|>` tokens may appear in `content` for affected models.
+- Tool-call template patches that lleme applies for llama.cpp don't reach the MLX path; tool-call quality on a few model families is degraded.
+
+If something breaks on MLX, falling back to the GGUF version of the same model is usually one command away.
 
 ## Use with Claude Code
 
@@ -118,8 +138,8 @@ lleme remove --older-than 30d
 | Model | `status` / `ps` | Show server status and loaded models |
 | Personas | `persona list/show/create/edit/rm` | Manage personas |
 | Server | `server start/stop/restart` | Manage the proxy server |
-| Discovery | `search <query>` | Search Hugging Face for GGUF models |
-| Discovery | `trending` | Show trending GGUF models |
+| Discovery | `search <query>` | Search Hugging Face for GGUF and MLX models |
+| Discovery | `trending` | Show trending GGUF and MLX models |
 | Discovery | `info <model>` / `show` | Show model details |
 | Config | `config show/edit/path/get/set/reset` | Manage configuration |
 | Other | `update` | Update lleme and llama.cpp |
@@ -198,7 +218,7 @@ CLI flags always win, followed by persona settings, then global config. This mea
 
 Everything is stored in `~/.lleme/`:
 - `config.yaml`: Your settings.
-- `models/`: Downloaded GGUF files.
+- `models/`: Downloaded GGUF and MLX models.
 - `personas/`: Saved system prompts and settings.
 - `logs/`: Logs for the proxy and individual model backends.
 
@@ -212,7 +232,8 @@ Bug reports and PRs are welcome. For larger changes, please open an issue first 
 
 ## Acknowledgments
 
-- [llama.cpp](https://github.com/ggml-org/llama.cpp) — the inference engine
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) — the GGUF inference engine
+- [SwiftLM](https://github.com/SharpAI-Lab/SwiftLM) — the MLX inference server (Apple Silicon)
 - [Hugging Face](https://huggingface.co) — model hosting and discovery
 - [Charmbracelet](https://charm.sh) — `bubbletea`, `lipgloss`, and `glamour` power the TUI
 - [assistant-ui](https://github.com/Yonom/assistant-ui) — the web chat interface

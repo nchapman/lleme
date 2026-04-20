@@ -38,6 +38,11 @@ var (
 	ctxSize   int
 	gpuLayers int
 	threads   int
+
+	// SwiftLM boolean toggles (ignored by llama.cpp backends with a warning)
+	thinkingFlag bool
+	visionFlag   bool
+	audioFlag    bool
 )
 
 var runCmd = &cobra.Command{
@@ -64,12 +69,9 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 			ui.Fatal("Failed to load config: %v", err)
 		}
 
-		// Step 1: Ensure llama.cpp is installed
-		if !llama.IsInstalled() {
-			if err := ensureLlamaInstalled(); err != nil {
-				ui.Fatal("%v", err)
-			}
-		}
+		// Backend install is deferred until after model resolution so we
+		// only download the runtime we actually need (GGUF → llama.cpp,
+		// MLX → SwiftLM). See Step 2 below.
 
 		modelQuery := args[0]
 		promptStartIdx := 1 // Where prompt args begin (shifts if persona has no model)
@@ -107,6 +109,18 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 		// Step 2: Validate model exists (or offer to pull)
 		resolvedModel, err := validateModel(modelQuery, cfg)
 		if err != nil {
+			ui.Fatal("%v", err)
+		}
+
+		// Install the backend this specific model needs. validateModel may
+		// have just pulled it, so metadata is fresh and BackendKindForModelName
+		// returns the right kind.
+		kind := hf.BackendKindForModelName(resolvedModel.FullName)
+		need := neededBackends{
+			Llama:   kind == hf.BackendGGUF,
+			SwiftLM: kind == hf.BackendMLX,
+		}
+		if err := ensureBackends(need); err != nil {
 			ui.Fatal("%v", err)
 		}
 
@@ -168,12 +182,18 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 
 		// One-shot mode for CLI prompts or piped input
 		if promptArg != "" {
+			// Resolve the backend kind so preset/persona backend-specific
+			// sections land in the right runtime. Errors fall back to
+			// gguf inside the helper, which is the safe default.
+			backendKind := hf.BackendKindForModelName(modelName)
+
 			// Preload model with options (sync - user is blocked waiting for output anyway)
 			var personaOpts map[string]any
 			if activePersona != nil {
-				personaOpts = activePersona.GetServerOptions()
+				personaOpts = activePersona.GetServerOptions(backendKind)
 			}
-			mergedOpts := presets.MergeServerOptions(activePreset, personaOpts)
+			mergedOpts := presets.MergeServerOptions(activePreset, personaOpts, backendKind)
+			mergedOpts = mergeSessionToggles(cmd, backendKind, mergedOpts)
 			if ctxSizeSet || gpuLayersSet || threadsSet || mergedOpts != nil {
 				opts := &server.RunOptions{
 					Options: mergedOpts,
@@ -206,6 +226,12 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 		m.SetInitialServerOptions(ctxSize, gpuLayers, threads, ctxSizeSet, gpuLayersSet, threadsSet)
 		m.SetSamplingOptions(temperature, topP, minP, repeatPenalty, presencePenalty, frequencyPenalty, topK, tokens)
 		m.SetSystemPrompt(systemPrompt)
+		// The MLX-kind check in the TUI helper drops mismatched toggles
+		// silently (warning mid-render corrupts the screen). Users get
+		// the warning on the one-shot path.
+		if toggles := collectSessionToggles(cmd); toggles != nil {
+			m.SetSessionToggles(toggles)
+		}
 
 		p := tea.NewProgram(m, tea.WithAltScreen())
 		m.SetProgram(p)
@@ -214,6 +240,59 @@ Models are loaded on-demand and unloaded after idle timeout.`,
 			ui.Fatal("TUI error: %v", err)
 		}
 	},
+}
+
+// mergeSessionToggles overlays CLI toggles onto mergedOpts. Toggles that
+// belong to a different backend (e.g. --thinking on a GGUF model) warn once
+// and are dropped so cross-backend personas work without the user editing
+// YAML between runs.
+func mergeSessionToggles(cmd *cobra.Command, backendKind string, mergedOpts map[string]any) map[string]any {
+	for _, t := range sessionToggleFlags() {
+		if !cmd.Flags().Changed(t.flag) {
+			continue
+		}
+		if backendKind != hf.BackendMLX {
+			fmt.Println(ui.Warning(fmt.Sprintf("--%s has no effect on llama.cpp backends; ignoring.", t.flag)))
+			continue
+		}
+		if mergedOpts == nil {
+			mergedOpts = make(map[string]any)
+		}
+		mergedOpts[t.flag] = t.value
+	}
+	return mergedOpts
+}
+
+// collectSessionToggles returns the CLI toggles the user explicitly set,
+// keyed by flag name. Returns nil when nothing was set so callers can skip
+// the TUI setter entirely. Unlike mergeSessionToggles, this does not warn
+// — the TUI path doesn't know the backend kind until preloadModel runs.
+func collectSessionToggles(cmd *cobra.Command) map[string]any {
+	var out map[string]any
+	for _, t := range sessionToggleFlags() {
+		if !cmd.Flags().Changed(t.flag) {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]any)
+		}
+		out[t.flag] = t.value
+	}
+	return out
+}
+
+func sessionToggleFlags() []struct {
+	flag  string
+	value bool
+} {
+	return []struct {
+		flag  string
+		value bool
+	}{
+		{"thinking", thinkingFlag},
+		{"vision", visionFlag},
+		{"audio", audioFlag},
+	}
 }
 
 // ensureLlamaInstalled installs llama.cpp if not present
@@ -475,4 +554,11 @@ func init() {
 	runCmd.Flags().IntVar(&ctxSize, "ctx-size", 0, "Context size (0 = model default)")
 	runCmd.Flags().IntVar(&gpuLayers, "gpu-layers", 0, "GPU layers to offload (0 = auto)")
 	runCmd.Flags().IntVar(&threads, "threads", 0, "CPU threads (0 = auto)")
+
+	// SwiftLM-specific toggles. These are safe to leave on a persona or preset
+	// shared between backends; on llama.cpp they emit a one-line warning and
+	// are ignored.
+	runCmd.Flags().BoolVar(&thinkingFlag, "thinking", false, "Enable reasoning mode (SwiftLM only)")
+	runCmd.Flags().BoolVar(&visionFlag, "vision", false, "Enable vision input (SwiftLM only)")
+	runCmd.Flags().BoolVar(&audioFlag, "audio", false, "Enable audio input (SwiftLM only)")
 }

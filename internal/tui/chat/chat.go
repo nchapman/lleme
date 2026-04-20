@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/nchapman/lleme/internal/config"
+	"github.com/nchapman/lleme/internal/hf"
 	"github.com/nchapman/lleme/internal/options"
 	"github.com/nchapman/lleme/internal/presets"
 	"github.com/nchapman/lleme/internal/server"
@@ -78,6 +79,7 @@ type Model struct {
 	// Session state
 	chatMessages         []server.ChatMessage
 	options              SessionOptions
+	sessionToggles       map[string]any // SwiftLM --thinking/--vision/--audio flags for preload
 	pendingReload        bool
 	systemPromptOverride string
 
@@ -133,7 +135,7 @@ func New(api *server.APIClient, modelName string, cfg *config.Config, persona *c
 		persona:     persona,
 		preset:      preset,
 		personaName: personaName,
-		resolver:    options.NewResolver(persona, cfg, preset),
+		resolver:    options.NewResolver(persona, cfg, preset).WithBackendKind(hf.BackendKindForModelName(modelName)),
 
 		chatMessages: []server.ChatMessage{},
 		keys:         DefaultKeyMap(),
@@ -164,6 +166,14 @@ func (m *Model) SetInitialServerOptions(ctxSize, gpuLayers, threads int, ctxSize
 	m.options.CtxSizeSet = ctxSizeSet
 	m.options.GpuLayersSet = gpuLayersSet
 	m.options.ThreadsSet = threadsSet
+}
+
+// SetSessionToggles supplies SwiftLM-specific boolean CLI flags
+// (--thinking, --vision, --audio) to layer into the preload options map.
+// Silently dropped when the resolved backend kind isn't MLX — warning the
+// user mid-render would corrupt the TUI.
+func (m *Model) SetSessionToggles(toggles map[string]any) {
+	m.sessionToggles = toggles
 }
 
 // SetSamplingOptions sets the sampling options from CLI flags
@@ -200,11 +210,23 @@ func (m *Model) preloadModel() tea.Cmd {
 	api := m.api
 	model := m.model
 	options := m.options
+	kind := hf.BackendKindForModelName(m.model)
 	var personaOpts map[string]any
 	if m.persona != nil {
-		personaOpts = m.persona.GetServerOptions()
+		personaOpts = m.persona.GetServerOptions(kind)
 	}
-	mergedOpts := presets.MergeServerOptions(m.preset, personaOpts)
+	mergedOpts := presets.MergeServerOptions(m.preset, personaOpts, kind)
+	// Layer CLI toggle flags on top; only for MLX (where they're meaningful).
+	// llama.cpp callers see a warning on stdout from the cmd-level helper
+	// before the TUI takes over; here we drop silently.
+	if kind == hf.BackendMLX && len(m.sessionToggles) > 0 {
+		if mergedOpts == nil {
+			mergedOpts = make(map[string]any)
+		}
+		for k, v := range m.sessionToggles {
+			mergedOpts[k] = v
+		}
+	}
 
 	return func() tea.Msg {
 		var opts *server.RunOptions

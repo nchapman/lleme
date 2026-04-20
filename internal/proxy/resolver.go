@@ -2,8 +2,6 @@ package proxy
 
 import (
 	"fmt"
-	"io/fs"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -11,13 +9,17 @@ import (
 	"github.com/nchapman/lleme/internal/hf"
 )
 
-// DownloadedModel represents a model that has been downloaded locally
+// DownloadedModel represents a model that has been downloaded locally.
+// Backend is the runtime kind (hf.BackendGGUF | hf.BackendMLX). ModelPath
+// is the file llama-server would open (single GGUF or first split) or the
+// MLX directory SwiftLM is pointed at.
 type DownloadedModel struct {
 	User      string
 	Repo      string
 	Quant     string
+	Backend   string
 	FullName  string // "user/repo:quant"
-	ModelPath string // Absolute path to .gguf file
+	ModelPath string
 }
 
 // ModelResolver handles fuzzy matching of model names against downloaded models
@@ -32,80 +34,35 @@ func NewModelResolver() *ModelResolver {
 	}
 }
 
-// ListDownloadedModels returns all downloaded models
+// ListDownloadedModels returns every locally-downloaded model. Delegates to
+// the metadata-driven hf.ListLocalModels so MLX trees are first-class;
+// ModelPath is adjusted for GGUF split layouts so llama-server gets the
+// first shard path it expects.
 func (r *ModelResolver) ListDownloadedModels() ([]DownloadedModel, error) {
-	var models []DownloadedModel
-	seenSplitDirs := make(map[string]bool)
-
-	err := filepath.WalkDir(r.modelsPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return fmt.Errorf("walk %s: %w", path, err)
-		}
-		if d.IsDir() || filepath.Ext(d.Name()) != ".gguf" {
-			return nil
-		}
-		if hf.IsMMProjFileName(d.Name()) {
-			return nil
-		}
-
-		relPath, err := filepath.Rel(r.modelsPath, path)
-		if err != nil {
-			return fmt.Errorf("relative path of %s: %w", path, err)
-		}
-
-		parts := strings.Split(relPath, string(filepath.Separator))
-		if len(parts) < 3 {
-			return nil
-		}
-
-		user, repo := parts[0], parts[1]
-
-		if m, ok := classifyGGUFEntry(user, repo, parts, path, seenSplitDirs); ok {
-			models = append(models, m)
-		}
-
-		return nil
-	})
-
+	locals, err := hf.ListLocalModelsInDir(r.modelsPath)
 	if err != nil {
 		return nil, fmt.Errorf("list downloaded models: %w", err)
 	}
-
-	return models, nil
-}
-
-// classifyGGUFEntry determines whether a GGUF file is a split or single-file model
-// and returns the corresponding DownloadedModel. Returns (model, false) if the file
-// should be skipped (e.g., a duplicate split shard).
-func classifyGGUFEntry(user, repo string, parts []string, path string, seenSplitDirs map[string]bool) (DownloadedModel, bool) {
-	if len(parts) == 4 && hf.SplitFilePattern.MatchString(filepath.Base(path)) {
-		quant := parts[2]
-		key := filepath.Join(user, repo, quant)
-		if seenSplitDirs[key] {
-			return DownloadedModel{}, false
+	out := make([]DownloadedModel, 0, len(locals))
+	for _, m := range locals {
+		path := m.Path
+		// Inventory returns the quant directory for split GGUF; llama-server
+		// wants the first shard. MLX stays as the directory.
+		if m.Backend == hf.BackendGGUF && !strings.HasSuffix(path, ".gguf") {
+			if first := hf.FindFirstSplitFile(path); first != "" {
+				path = first
+			}
 		}
-		seenSplitDirs[key] = true
-		firstPath := hf.FindFirstSplitFile(filepath.Dir(path))
-		if firstPath == "" {
-			firstPath = path
-		}
-		return DownloadedModel{
-			User:      user,
-			Repo:      repo,
-			Quant:     quant,
-			FullName:  fmt.Sprintf("%s/%s:%s", user, repo, quant),
-			ModelPath: firstPath,
-		}, true
+		out = append(out, DownloadedModel{
+			User:      m.User,
+			Repo:      m.Repo,
+			Quant:     m.Quant,
+			Backend:   m.Backend,
+			FullName:  fmt.Sprintf("%s/%s:%s", m.User, m.Repo, m.Quant),
+			ModelPath: path,
+		})
 	}
-
-	quant := strings.TrimSuffix(filepath.Base(path), ".gguf")
-	return DownloadedModel{
-		User:      user,
-		Repo:      repo,
-		Quant:     quant,
-		FullName:  fmt.Sprintf("%s/%s:%s", user, repo, quant),
-		ModelPath: path,
-	}, true
+	return out, nil
 }
 
 // ResolveResult contains the result of a model resolution

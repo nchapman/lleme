@@ -9,24 +9,65 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Persona represents a saved model configuration with optional system prompt and options.
-type Persona struct {
-	Model   string         `yaml:"model,omitempty"`
-	System  string         `yaml:"system,omitempty"`
+// PersonaBackendSection holds runtime-specific option overrides. When set,
+// these layer on top of Persona.Options for the matching backend only.
+type PersonaBackendSection struct {
 	Options map[string]any `yaml:"options,omitempty"`
 }
 
-// GetServerOptions returns all persona options to pass to the model loading API.
-// Returns a shallow copy to prevent callers from mutating persona state.
-func (p *Persona) GetServerOptions() map[string]any {
-	if p == nil || len(p.Options) == 0 {
+// Persona represents a saved model configuration with optional system prompt and options.
+//
+// Options layering (per backend) is:
+//
+//	shared Options → backend-specific Options (later wins)
+//
+// so a persona that sets temp globally and repeat-penalty only under
+// llamacpp emits both flags for a GGUF model and only the shared temp for an
+// MLX model.
+type Persona struct {
+	Model    string                `yaml:"model,omitempty"`
+	System   string                `yaml:"system,omitempty"`
+	Options  map[string]any        `yaml:"options,omitempty"`
+	LlamaCpp PersonaBackendSection `yaml:"llamacpp,omitempty"`
+	SwiftLM  PersonaBackendSection `yaml:"swiftlm,omitempty"`
+}
+
+// GetServerOptions returns all persona options to pass to the model loading
+// API, layered for the given backend kind (hf.BackendGGUF / hf.BackendMLX).
+// An empty kind applies only the shared Options map. Returns a shallow copy
+// to prevent callers from mutating persona state.
+func (p *Persona) GetServerOptions(kind string) map[string]any {
+	if p == nil {
 		return nil
 	}
-	out := make(map[string]any, len(p.Options))
+	specific := p.backendOptions(kind)
+	if len(p.Options) == 0 && len(specific) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(p.Options)+len(specific))
 	for k, v := range p.Options {
 		out[k] = v
 	}
+	for k, v := range specific {
+		out[k] = v
+	}
 	return out
+}
+
+// backendOptions returns the Options map for the given backend kind, or nil.
+// Kind strings mirror the hf package's BackendGGUF / BackendMLX constants;
+// kept as string literals here to avoid importing hf and creating a
+// config → hf dependency (hf already depends on config). If these strings
+// ever drift, the hf package's parseBackendKind will reject the value and
+// the selectRuntime switch will surface the mismatch.
+func (p *Persona) backendOptions(kind string) map[string]any {
+	switch kind {
+	case "gguf":
+		return p.LlamaCpp.Options
+	case "mlx":
+		return p.SwiftLM.Options
+	}
+	return nil
 }
 
 const personasDir = "personas"
@@ -126,12 +167,20 @@ func writePersonaSystemSection(b *strings.Builder, persona *Persona) {
 }
 
 func writePersonaOptionsSection(b *strings.Builder, persona *Persona) error {
-	b.WriteString("# llama.cpp options (same as config llamacpp.options)\n")
+	b.WriteString("# Shared options — applied to whatever backend the model uses.\n")
 	b.WriteString("# options:\n")
 	b.WriteString("#   temp: 0.8\n")
 	b.WriteString("#   top-p: 0.9\n")
 	b.WriteString("#   top-k: 40\n")
 	b.WriteString("#   repeat-penalty: 1.0\n")
+	b.WriteString("#\n")
+	b.WriteString("# Backend-specific overrides layer on top of shared options:\n")
+	b.WriteString("# llamacpp:\n")
+	b.WriteString("#   options:\n")
+	b.WriteString("#     mirostat: 2\n")
+	b.WriteString("# swiftlm:\n")
+	b.WriteString("#   options:\n")
+	b.WriteString("#     turbo-kv: true\n")
 
 	if len(persona.Options) == 0 {
 		return nil

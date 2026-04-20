@@ -47,6 +47,7 @@ type Config struct {
 	HuggingFace HuggingFace `yaml:"huggingface"`
 	Server      Server      `yaml:"server"`
 	LlamaCpp    LlamaCpp    `yaml:"llamacpp"`
+	SwiftLM     SwiftLM     `yaml:"swiftlm"`
 }
 
 type HuggingFace struct {
@@ -55,7 +56,13 @@ type HuggingFace struct {
 }
 
 type LlamaCpp struct {
-	ServerPath string         `yaml:"server_path,omitempty"`
+	AutoUpdate *bool          `yaml:"auto_update,omitempty"`
+	Options    map[string]any `yaml:"options,omitempty"`
+}
+
+// SwiftLM holds settings for the MLX / SwiftLM runtime. Scoped separately
+// from LlamaCpp so flags from one backend don't bleed into the other.
+type SwiftLM struct {
 	AutoUpdate *bool          `yaml:"auto_update,omitempty"`
 	Options    map[string]any `yaml:"options,omitempty"`
 }
@@ -63,6 +70,17 @@ type LlamaCpp struct {
 // AutoUpdateEnabled reports whether background llama.cpp updates are enabled.
 // Defaults to true when unset so fresh installs stay current without manual action.
 func (c *LlamaCpp) AutoUpdateEnabled() bool {
+	if c.AutoUpdate == nil {
+		return true
+	}
+	return *c.AutoUpdate
+}
+
+// AutoUpdateEnabled reports whether background SwiftLM updates are enabled.
+// Defaults to true for parity with LlamaCpp. No-ops on non-darwin-arm64
+// platforms regardless of this setting — gated by swiftlm.IsSupported() at
+// the call site.
+func (c *SwiftLM) AutoUpdateEnabled() bool {
 	if c.AutoUpdate == nil {
 		return true
 	}
@@ -183,9 +201,6 @@ server:
 # All options here are passed directly to llama-server.
 # See 'llama-server --help' for the full list.
 llamacpp:
-  # Path to llama-server binary (empty = auto-detect)
-  # server_path: ""
-
   # Auto-update llama.cpp in the background on server start (default: true)
   # llama.cpp ships frequently; newer builds fix issues with newly released
   # models. Disable if you want to pin a known-good version.
@@ -222,6 +237,34 @@ llamacpp:
 
     # --- Reasoning models ---
     # reasoning-format: auto   # Thinking token handling (auto, none, deepseek)
+
+# SwiftLM (MLX) server settings — only applies to MLX-format models on
+# Apple Silicon. Unknown keys are silently dropped, so llamacpp options
+# above won't break MLX backends.
+swiftlm:
+  # Auto-update SwiftLM in the background on server start (default: true).
+  # Has no effect on non-Apple-Silicon hosts since SwiftLM isn't supported
+  # there.
+  # auto_update: true
+
+  # options:
+    # --- Core ---
+    # ctx-size: 8192           # Context window (KV cache)
+    # max-tokens: 2048         # Default max tokens per request
+    # parallel: 1              # Parallel request slots
+    # gpu-layers: auto         # "auto" or integer
+
+    # --- Sampling defaults (overridable per request) ---
+    # temp: 0.6                # Temperature (0 = greedy)
+    # top-p: 1.0               # Top-p / nucleus sampling
+    # top-k: 50                # Top-k (0 = disabled)
+    # min-p: 0.0               # Min-p sampling
+    # repeat-penalty: 1.0      # Repetition penalty
+
+    # --- Mode toggles ---
+    # thinking: false          # Qwen3.5-style reasoning mode
+    # vision: false            # Enable VLM (image inputs)
+    # audio: false             # Enable ALM (audio inputs)
 `
 
 func Load() (*Config, error) {
@@ -283,6 +326,17 @@ func SaveDefault() error {
 // GetOption returns a llama-server option value from the config.
 // Returns the value and true if found, or nil and false if not set.
 func (c *LlamaCpp) GetOption(key string) (any, bool) {
+	if c.Options == nil {
+		return nil, false
+	}
+	val, ok := c.Options[key]
+	return val, ok
+}
+
+// GetOption returns a SwiftLM option value from the config.
+// Mirrors LlamaCpp.GetOption so the options.Resolver can dispatch by
+// backend kind without peeking at field names.
+func (c *SwiftLM) GetOption(key string) (any, bool) {
 	if c.Options == nil {
 		return nil, false
 	}

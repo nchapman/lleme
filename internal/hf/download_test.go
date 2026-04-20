@@ -3,6 +3,7 @@ package hf
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -241,6 +242,130 @@ func TestFindFirstSplitFileEmptyDir(t *testing.T) {
 	got := FindFirstSplitFile(tmpDir)
 	if got != "" {
 		t.Errorf("FindFirstSplitFile() = %v, want empty string", got)
+	}
+}
+
+func TestBackendKindRoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", oldHome)
+	os.Setenv("HOME", tmpDir)
+
+	user, repo, quant := "u", "r", "Q4_K_M"
+	if err := os.MkdirAll(GetModelPath(user, repo), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Unknown model → "gguf" as the legacy default.
+	got, err := GetBackendKind(user, repo, quant)
+	if err != nil {
+		t.Fatalf("GetBackendKind: %v", err)
+	}
+	if got != BackendGGUF {
+		t.Errorf("default kind = %q, want %q", got, BackendGGUF)
+	}
+
+	if err := SetBackendKind(user, repo, quant, BackendMLX); err != nil {
+		t.Fatalf("SetBackendKind: %v", err)
+	}
+	got, err = GetBackendKind(user, repo, quant)
+	if err != nil {
+		t.Fatalf("GetBackendKind: %v", err)
+	}
+	if got != BackendMLX {
+		t.Errorf("after set, kind = %q, want %q", got, BackendMLX)
+	}
+
+	// DownloadedAt auto-filled on first write.
+	meta, err := LoadMetadata(user, repo)
+	if err != nil {
+		t.Fatalf("LoadMetadata: %v", err)
+	}
+	if meta.Quants[quant].DownloadedAt.IsZero() {
+		t.Error("DownloadedAt was not set")
+	}
+
+	// Overwriting kind should keep DownloadedAt.
+	first := meta.Quants[quant].DownloadedAt
+	if err := SetBackendKind(user, repo, quant, BackendGGUF); err != nil {
+		t.Fatalf("SetBackendKind: %v", err)
+	}
+	meta, _ = LoadMetadata(user, repo)
+	if !meta.Quants[quant].DownloadedAt.Equal(first) {
+		t.Error("DownloadedAt should not change on rewrite")
+	}
+
+	// Empty Backend in metadata still reports gguf.
+	q := meta.Quants[quant]
+	q.Backend = ""
+	meta.Quants[quant] = q
+	if err := SaveMetadata(user, repo, meta); err != nil {
+		t.Fatalf("SaveMetadata: %v", err)
+	}
+	got, err = GetBackendKind(user, repo, quant)
+	if err != nil {
+		t.Fatalf("GetBackendKind: %v", err)
+	}
+	if got != BackendGGUF {
+		t.Errorf("empty field kind = %q, want %q", got, BackendGGUF)
+	}
+}
+
+func TestEnforceSizeCap(t *testing.T) {
+	cases := []struct {
+		name                    string
+		expectedSize, totalSize int64
+		wantCap                 int64
+		wantErr                 string
+	}{
+		{"disabled when expectedSize=0", 0, 1_000_000_000_000, 0, ""},
+		{"well within tolerance", 1_000_000, 1_500_000, 2*1_000_000 + (1 << 20), ""},
+		{"exactly at tolerance boundary", 1_000_000, 1_000_000*2 + (1 << 20), 1_000_000*2 + (1 << 20), ""},
+		{"over tolerance rejected", 1_000_000, 1_000_000 * 4, 0, "exceeds cap"},
+		// Pathological expectedSize rejected before arithmetic — guards
+		// against int64 overflow in `expectedSize*2 + slack` and the
+		// downstream LimitReader(sizeCap+1) bound.
+		{"expectedSize above sanity limit rejected", maxExpectedSize + 1, 0, 0, "sanity limit"},
+		{"expectedSize at MaxInt64 rejected", 1<<62 + 1, 0, 0, "sanity limit"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cap, err := enforceSizeCap("x.bin", tc.expectedSize, tc.totalSize)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("err = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if cap != tc.wantCap {
+				t.Errorf("cap = %d, want %d", cap, tc.wantCap)
+			}
+		})
+	}
+}
+
+func TestGetBackendKindRejectsUnknown(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", oldHome)
+	os.Setenv("HOME", tmpDir)
+
+	user, repo, quant := "u", "r", "q"
+	if err := os.MkdirAll(GetModelPath(user, repo), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Manually plant a corrupt / tampered metadata.yaml with an unknown
+	// backend kind. Reading it must error rather than silently dispatch.
+	yaml := "quants:\n  q:\n    backend: evil\n"
+	if err := os.WriteFile(GetMetadataPath(user, repo), []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := GetBackendKind(user, repo, quant)
+	if err == nil || !strings.Contains(err.Error(), "unrecognized backend kind") {
+		t.Errorf("err = %v, want unrecognized backend kind", err)
 	}
 }
 
