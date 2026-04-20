@@ -23,6 +23,7 @@ import (
 	"github.com/nchapman/lleme/internal/hf"
 	"github.com/nchapman/lleme/internal/llama"
 	"github.com/nchapman/lleme/internal/logs"
+	"github.com/nchapman/lleme/internal/proxy/normalize"
 	"github.com/nchapman/lleme/internal/swiftlm"
 	"github.com/nchapman/lleme/internal/version"
 )
@@ -284,9 +285,171 @@ func (s *Server) saveState() {
 	}
 }
 
-// handleChatCompletions proxies chat completion requests to the appropriate backend
+// handleChatCompletions proxies an OpenAI /v1/chat/completions request to
+// the resolved backend, then runs the response through the normalize layer
+// before returning it to the client. Mirrors handleAnthropicMessages so
+// both surfaces share the same forward-and-rewrite shape — the reverse-
+// proxy approach in proxyToBackend can't interpose on the response body,
+// which is what normalization needs.
+//
+// /v1/completions and /v1/embeddings still use the reverse-proxy
+// proxyToBackend helper: they have unrelated response shapes and don't
+// need this normalization layer.
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	s.proxyToBackend(w, r, "/v1/chat/completions")
+	body, ok := s.readOpenAIBody(w, r)
+	if !ok {
+		return
+	}
+	modelName, ok := s.extractOpenAIModel(w, body)
+	if !ok {
+		return
+	}
+	stream := requestWantsStream(body)
+
+	backend, err := s.manager.GetOrLoadBackend(modelName, nil)
+	if err != nil {
+		s.handleModelError(w, err)
+		return
+	}
+	defer backend.ReleaseRequest()
+
+	resp, err := s.forwardToBackendChat(r.Context(), backend, body, stream)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "server_error", "Backend request failed: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		// Short-circuit: don't run the backend's error body through the
+		// normalize layer (which expects a chat-completion shape and
+		// would silently rewrite fields like model/system_fingerprint
+		// onto the error envelope). Cap the body we echo back so a
+		// misbehaving backend can't push arbitrary memory through.
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
+		msg := strings.TrimSpace(string(errBody))
+		if msg == "" {
+			msg = fmt.Sprintf("backend returned %d", resp.StatusCode)
+		}
+		s.writeError(w, resp.StatusCode, openAIErrorTypeForStatus(resp.StatusCode), msg)
+		return
+	}
+
+	// Apply the same CORS strip the reverse-proxy ModifyResponse path uses,
+	// so the proxy's own CORS middleware isn't shadowed by backend headers.
+	_ = stripCORSHeaders(resp)
+
+	wrapped := normalize.Wrap(resp.Body, normalize.Options{
+		RequestedModel: modelName,
+		Streaming:      stream,
+		Fingerprint:    "lleme-" + version.Version,
+	})
+
+	if stream {
+		writeNormalizedStream(w, resp, wrapped)
+		return
+	}
+	s.writeNormalizedResponse(w, resp, wrapped)
+}
+
+// requestWantsStream reads only the "stream" field from a request body.
+// Defaults to false (matches OpenAI's spec) when absent or malformed —
+// callers already validated the body shape via extractOpenAIModel.
+func requestWantsStream(body []byte) bool {
+	var req struct {
+		Stream bool `json:"stream"`
+	}
+	_ = json.Unmarshal(body, &req)
+	return req.Stream
+}
+
+// writeNormalizedStream copies SSE bytes from the normalize wrapper to
+// the client, flushing after each read so single-token deltas reach the
+// browser/SDK without buffering. Mirrors the SSE response shape from
+// writeAnthropicStream — same headers, same flush cadence.
+func writeNormalizedStream(w http.ResponseWriter, resp *http.Response, body io.Reader) {
+	copyResponseHeaders(w, resp, true)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(resp.StatusCode)
+
+	flusher, _ := w.(http.Flusher)
+	buf := make([]byte, 8*1024)
+	for {
+		n, err := body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				logs.Debug("openai stream write failed", "error", werr)
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			logs.Debug("openai stream read failed", "error", err)
+			return
+		}
+	}
+}
+
+// writeNormalizedResponse drains the (already-normalized) body, sets
+// Content-Length to the rewritten length, and writes the response. The
+// upstream Content-Length is intentionally discarded — re-marshaling
+// changes byte count.
+func (s *Server) writeNormalizedResponse(w http.ResponseWriter, resp *http.Response, body io.Reader) {
+	out, err := io.ReadAll(body)
+	if err != nil {
+		// Headers haven't been written yet — emit a proper OpenAI
+		// error envelope so clients always see a parseable error
+		// shape, never a plain-text http.Error body.
+		status := http.StatusBadGateway
+		if errors.Is(err, normalize.ErrResponseTooLarge) {
+			status = http.StatusBadGateway
+		}
+		s.writeError(w, status, "server_error", "Failed to read backend response: "+err.Error())
+		return
+	}
+	copyResponseHeaders(w, resp, false)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(out)))
+	w.WriteHeader(resp.StatusCode)
+	if _, werr := w.Write(out); werr != nil {
+		logs.Debug("openai response write failed", "error", werr)
+	}
+}
+
+// copyResponseHeaders forwards backend response headers to the client,
+// dropping headers that we control or that no longer apply after
+// rewriting. CORS is stripped earlier via stripCORSHeaders. We always
+// drop Content-Length (recomputed for non-stream, irrelevant for SSE)
+// and hop-by-hop headers per RFC 7230.
+func copyResponseHeaders(w http.ResponseWriter, resp *http.Response, streaming bool) {
+	for k, vs := range resp.Header {
+		switch http.CanonicalHeaderKey(k) {
+		case "Content-Length",
+			"Transfer-Encoding",
+			"Connection",
+			"Keep-Alive",
+			"Proxy-Authenticate",
+			"Proxy-Authorization",
+			"Te",
+			"Trailer",
+			"Upgrade":
+			continue
+		case "Content-Type", "Cache-Control":
+			if streaming {
+				// Streaming path sets these explicitly; skip backend
+				// values to avoid double-set.
+				continue
+			}
+		}
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
 }
 
 // handleCompletions proxies completion requests to the appropriate backend
@@ -349,29 +512,35 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Pass the upstream body through the normalize layer before the
+	// Anthropic translator sees it. SwiftLM's prefill_progress frames
+	// would otherwise reach handleStreamLine as malformed-but-parseable
+	// JSON and emit phantom Anthropic events; the model rewrite and
+	// envelope synthesis are no-ops on the Anthropic surface but keep
+	// both code paths consuming an identical OpenAI shape.
+	wrapped := normalize.Wrap(resp.Body, normalize.Options{
+		RequestedModel: modelName,
+		Streaming:      stream,
+		Fingerprint:    "lleme-" + version.Version,
+	})
+
 	messageID := generateMessageID()
 	if stream {
-		s.writeAnthropicStream(w, resp.Body, requestID, messageID, modelName)
+		s.writeAnthropicStream(w, wrapped, requestID, messageID, modelName)
 		return
 	}
-	s.writeAnthropicNonStream(w, resp.Body, requestID, messageID)
+	s.writeAnthropicNonStream(w, wrapped, requestID, messageID)
 }
 
 // extractAnthropicModel pulls the model field out of an Anthropic request
 // body and writes an error response if missing or malformed.
 func (s *Server) extractAnthropicModel(w http.ResponseWriter, requestID string, body []byte) (string, bool) {
-	var modelRef struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(body, &modelRef); err != nil {
-		s.writeAnthropicError(w, requestID, http.StatusBadRequest, AnthropicInvalidRequest, "Failed to parse request body as JSON")
+	model, err := parseModelField(body)
+	if err != nil {
+		s.writeAnthropicError(w, requestID, http.StatusBadRequest, AnthropicInvalidRequest, err.Error())
 		return "", false
 	}
-	if modelRef.Model == "" {
-		s.writeAnthropicError(w, requestID, http.StatusBadRequest, AnthropicInvalidRequest, "model: Field required")
-		return "", false
-	}
-	return modelRef.Model, true
+	return model, true
 }
 
 // forwardToBackendChat POSTs a translated OpenAI request to the backend's
@@ -395,7 +564,6 @@ func (s *Server) forwardToBackendChat(ctx context.Context, backend *Backend, ope
 func (s *Server) writeAnthropicStream(w http.ResponseWriter, body io.Reader, requestID, messageID, model string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("request-id", requestID)
 	w.WriteHeader(http.StatusOK)
 
@@ -460,26 +628,44 @@ var backendChatClient = &http.Client{}
 // error response on failure. Returns (body, true) on success, or (nil, false)
 // after writing an error response.
 func (s *Server) readAnthropicBody(w http.ResponseWriter, r *http.Request, requestID string) ([]byte, bool) {
-	if r.Method != http.MethodPost {
-		s.writeAnthropicError(w, requestID, http.StatusMethodNotAllowed, AnthropicInvalidRequest, "Only POST is allowed")
+	body, rbe := readBodyRaw(w, r)
+	if rbe != nil {
+		s.writeAnthropicError(w, requestID, rbe.status, AnthropicInvalidRequest, rbe.message)
 		return nil, false
+	}
+	// Strip Anthropic client auth headers before any downstream forwarding.
+	r.Header.Del("x-api-key")
+	return body, true
+}
+
+// readBodyErr carries the status + message for a request-read failure
+// without committing to a surface-specific error shape. Each handler
+// (OpenAI vs Anthropic) translates it to its own JSON envelope.
+type readBodyErr struct {
+	status  int
+	message string
+}
+
+// readBodyRaw enforces POST + size cap and drains the request body.
+// Surface-agnostic: callers translate the returned readBodyErr into
+// their own error response. Centralizing this avoids drift between
+// the two surfaces' size-limit and method-validation behavior.
+func readBodyRaw(w http.ResponseWriter, r *http.Request) ([]byte, *readBodyErr) {
+	if r.Method != http.MethodPost {
+		return nil, &readBodyErr{http.StatusMethodNotAllowed, "Only POST is allowed"}
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			s.writeAnthropicError(w, requestID, http.StatusRequestEntityTooLarge, AnthropicInvalidRequest,
-				fmt.Sprintf("Request body exceeds %d bytes", maxRequestBodyBytes))
-			return nil, false
+			return nil, &readBodyErr{http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("Request body exceeds %d bytes", maxRequestBodyBytes)}
 		}
-		s.writeAnthropicError(w, requestID, http.StatusBadRequest, AnthropicInvalidRequest, "Failed to read request body")
-		return nil, false
+		return nil, &readBodyErr{http.StatusBadRequest, "Failed to read request body"}
 	}
 	r.Body.Close()
-	// Strip Anthropic client auth headers before any downstream forwarding.
-	r.Header.Del("x-api-key")
-	return body, true
+	return body, nil
 }
 
 // writeAnthropicTranslationError maps a translation error to an Anthropic
@@ -542,41 +728,47 @@ func (s *Server) proxyToBackend(w http.ResponseWriter, r *http.Request, path str
 // endpoint, writing an OpenAI-shaped error on failure. Returns (body, true)
 // on success, (nil, false) after writing an error.
 func (s *Server) readOpenAIBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
-	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only POST is allowed")
-		return nil, false
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			s.writeError(w, http.StatusRequestEntityTooLarge, "invalid_request",
-				fmt.Sprintf("Request body exceeds %d bytes", maxRequestBodyBytes))
-			return nil, false
+	body, rbe := readBodyRaw(w, r)
+	if rbe != nil {
+		errType := "invalid_request"
+		if rbe.status == http.StatusMethodNotAllowed {
+			errType = "method_not_allowed"
 		}
-		s.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to read request body")
+		s.writeError(w, rbe.status, errType, rbe.message)
 		return nil, false
 	}
-	r.Body.Close()
 	return body, true
 }
 
 // extractOpenAIModel pulls the model field out of an OpenAI-style request
 // body, writing an OpenAI-shaped error on failure.
 func (s *Server) extractOpenAIModel(w http.ResponseWriter, body []byte) (string, bool) {
-	var req struct {
+	model, err := parseModelField(body)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return "", false
+	}
+	return model, true
+}
+
+// parseModelField extracts the "model" string from a request body. Used
+// by both the OpenAI and Anthropic surfaces — the request shape is the
+// same; only the error envelope differs, which the callers handle.
+//
+// Error messages are capitalized because they're user-facing API
+// response messages (rendered into the error.message JSON field), not
+// idiomatic Go error chains.
+func parseModelField(body []byte) (string, error) {
+	var ref struct {
 		Model string `json:"model"`
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request body")
-		return "", false
+	if err := json.Unmarshal(body, &ref); err != nil {
+		return "", errors.New("Failed to parse request body as JSON") //nolint:staticcheck // user-facing message
 	}
-	if req.Model == "" {
-		s.writeError(w, http.StatusBadRequest, "invalid_request", "Model field is required")
-		return "", false
+	if ref.Model == "" {
+		return "", errors.New("model: Field required") //nolint:staticcheck // user-facing message
 	}
-	return req.Model, true
+	return ref.Model, nil
 }
 
 // generateRequestID creates a unique request ID in Anthropic format
@@ -769,6 +961,37 @@ func (s *Server) writeError(w http.ResponseWriter, status int, errType, message 
 			Type:    errType,
 		},
 	})
+}
+
+// openAIErrorTypeForStatus maps an upstream HTTP status to the
+// short error-type string this proxy uses across all OpenAI error
+// responses (writeError call sites use "invalid_request",
+// "not_found", "server_error", "method_not_allowed", etc. — kept
+// for consistency over OpenAI's canonical "*_error" suffix forms).
+// A future canonicalization pass should align both this function
+// and the existing call sites in one go.
+func openAIErrorTypeForStatus(status int) string {
+	switch status {
+	case http.StatusBadRequest,
+		http.StatusRequestEntityTooLarge,
+		http.StatusUnprocessableEntity: // llama-server uses 422 for context overflow
+		return "invalid_request"
+	case http.StatusUnauthorized:
+		return "authentication_error"
+	case http.StatusForbidden:
+		return "permission_error"
+	case http.StatusNotFound:
+		return "not_found"
+	case http.StatusTooManyRequests:
+		return "rate_limit"
+	case http.StatusMethodNotAllowed:
+		return "method_not_allowed"
+	default:
+		if status >= 400 && status < 500 {
+			return "invalid_request"
+		}
+		return "server_error"
+	}
 }
 
 // decodeJSONBody reads r.Body under the shared size cap and decodes it into v.
