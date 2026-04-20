@@ -23,6 +23,7 @@ import (
 	"github.com/nchapman/lleme/internal/hf"
 	"github.com/nchapman/lleme/internal/llama"
 	"github.com/nchapman/lleme/internal/logs"
+	"github.com/nchapman/lleme/internal/swiftlm"
 	"github.com/nchapman/lleme/internal/version"
 )
 
@@ -115,50 +116,119 @@ func (s *Server) Start() error {
 	// Save initial state (no backends yet)
 	s.saveState()
 
-	// Check for llama.cpp updates in the background. Running backends keep using
-	// their currently-loaded binary; the new version is picked up on next model load.
+	// Check for backend updates in the background. Running backends keep using
+	// their currently-loaded binary; new versions are picked up on next model load.
 	ctx, cancel := context.WithCancel(context.Background())
 	s.autoUpdateCancel = cancel
 	go s.autoUpdateLlamaCpp(ctx)
+	go s.autoUpdateSwiftLM(ctx)
 
 	return nil
 }
 
-// autoUpdateLlamaCpp checks for a newer llama.cpp release and installs it in
-// the background. Runs on proxy startup. Failures are logged and do not affect
-// the proxy — the existing llama.cpp install remains functional. The context is
-// canceled on Stop so an in-flight download aborts rather than swapping the
-// llama-current symlink after shutdown.
-func (s *Server) autoUpdateLlamaCpp(ctx context.Context) {
-	if s.appConfig == nil || !s.appConfig.LlamaCpp.AutoUpdateEnabled() {
+// autoUpdateCheck bundles what one backend's NewerVersionAvailable +
+// identifiers resolve to before runBackendAutoUpdate drives the flow.
+type autoUpdateCheck struct {
+	name         string
+	enabled      bool
+	installedTag string
+	latestTag    string
+	haveLatest   bool
+	checkErr     error
+	install      func(context.Context) (string, error) // returns newly-installed tag
+}
+
+// runBackendAutoUpdate drives the check → install → log flow for one
+// backend. Failures never affect the proxy; the context is canceled on Stop
+// so an in-flight download aborts rather than swapping a symlink after
+// shutdown. Kept separate from the two per-backend constructors so the
+// shared logic isn't flagged as a duplicate.
+func runBackendAutoUpdate(ctx context.Context, c autoUpdateCheck) {
+	if !c.enabled {
 		return
 	}
-
-	latest, installed, err := llama.NewerVersionAvailable()
-	if err != nil {
-		logs.Debug("llama.cpp auto-update check failed", "error", err)
+	if c.checkErr != nil {
+		logs.Debug(c.name+" auto-update check failed", "error", c.checkErr)
 		return
 	}
-	if latest == nil {
+	if !c.haveLatest {
 		return
 	}
+	logs.Info("Auto-updating "+c.name+" in background", "from", c.installedTag, "to", c.latestTag)
 
-	fromTag := ""
-	if installed != nil {
-		fromTag = installed.TagName
-	}
-	logs.Info("Auto-updating llama.cpp in background", "from", fromTag, "to", latest.TagName)
-
-	info, err := llama.InstallReleaseForAutoUpdate(ctx, latest, nil)
+	newTag, err := c.install(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
-			logs.Debug("llama.cpp auto-update canceled on shutdown", "error", err)
+			logs.Debug(c.name+" auto-update canceled on shutdown", "error", err)
 			return
 		}
-		logs.Warn("llama.cpp auto-update failed", "error", err)
+		logs.Warn(c.name+" auto-update failed", "error", err)
 		return
 	}
-	logs.Info("llama.cpp auto-update installed; new model loads will use this version", "version", info.TagName)
+	logs.Info(c.name+" auto-update installed; new model loads will use this version", "version", newTag)
+}
+
+// autoUpdateLlamaCpp runs the llama.cpp auto-update check + install. The
+// structural twin autoUpdateSwiftLM below duplicates the glue deliberately
+// — collapsing both into a generic helper would lose per-backend types at
+// package boundaries; the shared flow lives in runBackendAutoUpdate.
+//
+//nolint:dupl // backend-identity repetition; see doc comment above.
+func (s *Server) autoUpdateLlamaCpp(ctx context.Context) {
+	latest, installed, err := llama.NewerVersionAvailable()
+	installedTag, latestTag := "", ""
+	if installed != nil {
+		installedTag = installed.TagName
+	}
+	if latest != nil {
+		latestTag = latest.TagName
+	}
+	runBackendAutoUpdate(ctx, autoUpdateCheck{
+		name:         "llama.cpp",
+		enabled:      s.appConfig != nil && s.appConfig.LlamaCpp.AutoUpdateEnabled(),
+		installedTag: installedTag,
+		latestTag:    latestTag,
+		haveLatest:   latest != nil,
+		checkErr:     err,
+		install: func(ctx context.Context) (string, error) {
+			info, err := llama.InstallReleaseForAutoUpdate(ctx, latest, nil)
+			if err != nil {
+				return "", err
+			}
+			return info.TagName, nil
+		},
+	})
+}
+
+// autoUpdateSwiftLM runs the SwiftLM auto-update check + install. Gated on
+// the platform via swiftlm.NewerVersionAvailable returning nil on hosts
+// SwiftLM doesn't support. See autoUpdateLlamaCpp for the design note.
+//
+//nolint:dupl // backend-identity repetition; see autoUpdateLlamaCpp.
+func (s *Server) autoUpdateSwiftLM(ctx context.Context) {
+	latest, installed, err := swiftlm.NewerVersionAvailable()
+	installedTag, latestTag := "", ""
+	if installed != nil {
+		installedTag = installed.TagName
+	}
+	if latest != nil {
+		latestTag = latest.TagName
+	}
+	runBackendAutoUpdate(ctx, autoUpdateCheck{
+		name:         "SwiftLM",
+		enabled:      s.appConfig != nil && s.appConfig.SwiftLM.AutoUpdateEnabled(),
+		installedTag: installedTag,
+		latestTag:    latestTag,
+		haveLatest:   latest != nil,
+		checkErr:     err,
+		install: func(ctx context.Context) (string, error) {
+			info, err := swiftlm.InstallReleaseForAutoUpdate(ctx, latest, nil)
+			if err != nil {
+				return "", err
+			}
+			return info.TagName, nil
+		},
+	})
 }
 
 // Stop gracefully stops the proxy server
@@ -229,54 +299,216 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	s.proxyToBackend(w, r, "/v1/embeddings")
 }
 
-// handleAnthropicMessages proxies Anthropic Messages API requests
+// handleAnthropicMessages translates an Anthropic /v1/messages request into
+// an OpenAI chat completion, forwards it to the selected backend, and
+// translates the response back. Translation happens in the proxy so backends
+// (llama-server, SwiftLM) only need to speak OpenAI.
 func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
-	s.proxyToBackendAnthropic(w, r, "/v1/messages")
-}
+	requestID := generateRequestID()
 
-// handleAnthropicCountTokens proxies Anthropic token counting requests
-func (s *Server) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
-	s.proxyToBackendAnthropic(w, r, "/v1/messages/count_tokens")
-}
-
-// proxyToBackend handles the common logic of extracting model and proxying
-func (s *Server) proxyToBackend(w http.ResponseWriter, r *http.Request, path string) {
-	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only POST is allowed")
+	body, ok := s.readAnthropicBody(w, r, requestID)
+	if !ok {
 		return
 	}
 
-	// Cap inbound body to prevent unbounded memory use.
+	modelName, ok := s.extractAnthropicModel(w, requestID, body)
+	if !ok {
+		return
+	}
+
+	openAIBody, stream, err := translateAnthropicRequest(body)
+	if err != nil {
+		s.writeAnthropicTranslationError(w, requestID, err)
+		return
+	}
+
+	backend, err := s.manager.GetOrLoadBackend(modelName, nil)
+	if err != nil {
+		s.handleAnthropicModelError(w, requestID, err)
+		return
+	}
+	defer backend.ReleaseRequest()
+
+	resp, err := s.forwardToBackendChat(r.Context(), backend, openAIBody, stream)
+	if err != nil {
+		s.writeAnthropicError(w, requestID, http.StatusBadGateway, AnthropicAPIError, "Backend request failed: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		// Cap the error body we buffer & echo back — a misbehaving backend
+		// shouldn't cause the proxy to hold a multi-MB error string in memory
+		// or leak arbitrarily large internals to the caller.
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
+		msg := strings.TrimSpace(string(errBody))
+		if msg == "" {
+			msg = fmt.Sprintf("backend returned %d", resp.StatusCode)
+		}
+		s.writeAnthropicError(w, requestID, resp.StatusCode, anthropicErrorTypeForStatus(resp.StatusCode), msg)
+		return
+	}
+
+	messageID := generateMessageID()
+	if stream {
+		s.writeAnthropicStream(w, resp.Body, requestID, messageID, modelName)
+		return
+	}
+	s.writeAnthropicNonStream(w, resp.Body, requestID, messageID)
+}
+
+// extractAnthropicModel pulls the model field out of an Anthropic request
+// body and writes an error response if missing or malformed.
+func (s *Server) extractAnthropicModel(w http.ResponseWriter, requestID string, body []byte) (string, bool) {
+	var modelRef struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &modelRef); err != nil {
+		s.writeAnthropicError(w, requestID, http.StatusBadRequest, AnthropicInvalidRequest, "Failed to parse request body as JSON")
+		return "", false
+	}
+	if modelRef.Model == "" {
+		s.writeAnthropicError(w, requestID, http.StatusBadRequest, AnthropicInvalidRequest, "model: Field required")
+		return "", false
+	}
+	return modelRef.Model, true
+}
+
+// forwardToBackendChat POSTs a translated OpenAI request to the backend's
+// /v1/chat/completions endpoint and returns the raw response.
+func (s *Server) forwardToBackendChat(ctx context.Context, backend *Backend, openAIBody []byte, stream bool) (*http.Response, error) {
+	backendURL := fmt.Sprintf("http://%s:%d/v1/chat/completions", s.config.Host, backend.Port)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, backendURL, bytes.NewReader(openAIBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if stream {
+		req.Header.Set("Accept", "text/event-stream")
+	}
+	return backendChatClient.Do(req)
+}
+
+// writeAnthropicStream sets SSE headers and pumps the translated stream.
+// Errors after the header has been written can't be surfaced to the client
+// as HTTP status; log them for debugging.
+func (s *Server) writeAnthropicStream(w http.ResponseWriter, body io.Reader, requestID, messageID, model string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("request-id", requestID)
+	w.WriteHeader(http.StatusOK)
+
+	if err := translateAnthropicStream(w, body, messageID, model); err != nil {
+		logs.Debug("anthropic stream translation ended with error", "error", err)
+	}
+}
+
+// writeAnthropicNonStream reads the full backend response, translates to
+// Anthropic format, and writes it.
+func (s *Server) writeAnthropicNonStream(w http.ResponseWriter, body io.Reader, requestID, messageID string) {
+	respBody, err := io.ReadAll(body)
+	if err != nil {
+		s.writeAnthropicError(w, requestID, http.StatusBadGateway, AnthropicAPIError, "Failed to read backend response")
+		return
+	}
+	translated, err := translateOpenAIResponse(respBody, messageID)
+	if err != nil {
+		s.writeAnthropicError(w, requestID, http.StatusInternalServerError, AnthropicAPIError, "Translation error: "+err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("request-id", requestID)
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(translated); err != nil {
+		logs.Debug("failed to write anthropic response", "error", err)
+	}
+}
+
+// handleAnthropicCountTokens returns an approximate input-token count for an
+// Anthropic /v1/messages/count_tokens request. Backends don't expose an
+// OpenAI-equivalent tokenize endpoint uniformly, so we approximate on the
+// proxy side. The estimate leans toward overcounting so callers plan
+// conservatively; see countAnthropicTokens for the ratio.
+func (s *Server) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
+	requestID := generateRequestID()
+
+	body, ok := s.readAnthropicBody(w, r, requestID)
+	if !ok {
+		return
+	}
+
+	count, err := countAnthropicTokens(body)
+	if err != nil {
+		s.writeAnthropicTranslationError(w, requestID, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("request-id", requestID)
+	w.WriteHeader(http.StatusOK)
+	writeJSON(w, map[string]int{"input_tokens": count})
+}
+
+// backendChatClient forwards translated requests to a local backend. No
+// timeout: streaming completions can run for minutes, and request-context
+// cancelation already covers the disconnect case. Named to avoid reading
+// like an Anthropic cloud client — the target is always a local backend.
+var backendChatClient = &http.Client{}
+
+// readAnthropicBody reads and size-caps the request body, writing an Anthropic
+// error response on failure. Returns (body, true) on success, or (nil, false)
+// after writing an error response.
+func (s *Server) readAnthropicBody(w http.ResponseWriter, r *http.Request, requestID string) ([]byte, bool) {
+	if r.Method != http.MethodPost {
+		s.writeAnthropicError(w, requestID, http.StatusMethodNotAllowed, AnthropicInvalidRequest, "Only POST is allowed")
+		return nil, false
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			s.writeError(w, http.StatusRequestEntityTooLarge, "invalid_request",
+			s.writeAnthropicError(w, requestID, http.StatusRequestEntityTooLarge, AnthropicInvalidRequest,
 				fmt.Sprintf("Request body exceeds %d bytes", maxRequestBodyBytes))
-			return
+			return nil, false
 		}
-		s.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to read request body")
-		return
+		s.writeAnthropicError(w, requestID, http.StatusBadRequest, AnthropicInvalidRequest, "Failed to read request body")
+		return nil, false
 	}
 	r.Body.Close()
+	// Strip Anthropic client auth headers before any downstream forwarding.
+	r.Header.Del("x-api-key")
+	return body, true
+}
 
-	var req struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request body")
+// writeAnthropicTranslationError maps a translation error to an Anthropic
+// HTTP response. translateError carries the intended status and error type;
+// other errors surface as 500 api_error.
+func (s *Server) writeAnthropicTranslationError(w http.ResponseWriter, requestID string, err error) {
+	var te *translateError
+	if errors.As(err, &te) {
+		s.writeAnthropicError(w, requestID, te.status, te.errType, te.msg)
 		return
 	}
+	s.writeAnthropicError(w, requestID, http.StatusInternalServerError, AnthropicAPIError, err.Error())
+}
 
-	if req.Model == "" {
-		s.writeError(w, http.StatusBadRequest, "invalid_request", "Model field is required")
+// proxyToBackend handles the common logic of extracting model and proxying
+// an OpenAI-style request verbatim to the resolved backend.
+func (s *Server) proxyToBackend(w http.ResponseWriter, r *http.Request, path string) {
+	body, ok := s.readOpenAIBody(w, r)
+	if !ok {
+		return
+	}
+	modelName, ok := s.extractOpenAIModel(w, body)
+	if !ok {
 		return
 	}
 
 	// Get or load the backend (no options override for chat endpoint).
 	// GetOrLoadBackend reserves the backend via AcquireRequest; we release on return.
-	backend, err := s.manager.GetOrLoadBackend(req.Model, nil)
+	backend, err := s.manager.GetOrLoadBackend(modelName, nil)
 	if err != nil {
 		s.handleModelError(w, err)
 		return
@@ -306,84 +538,45 @@ func (s *Server) proxyToBackend(w http.ResponseWriter, r *http.Request, path str
 	proxy.ServeHTTP(w, r)
 }
 
-// proxyToBackendAnthropic handles Anthropic API requests with proper error format
-func (s *Server) proxyToBackendAnthropic(w http.ResponseWriter, r *http.Request, path string) {
-	requestID := generateRequestID()
-
+// readOpenAIBody reads and size-caps the request body for an OpenAI-style
+// endpoint, writing an OpenAI-shaped error on failure. Returns (body, true)
+// on success, (nil, false) after writing an error.
+func (s *Server) readOpenAIBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	if r.Method != http.MethodPost {
-		s.writeAnthropicError(w, requestID, http.StatusMethodNotAllowed, AnthropicInvalidRequest, "Only POST is allowed")
-		return
+		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only POST is allowed")
+		return nil, false
 	}
-
-	// Cap inbound body to prevent unbounded memory use.
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			s.writeAnthropicError(w, requestID, http.StatusRequestEntityTooLarge, AnthropicInvalidRequest,
+			s.writeError(w, http.StatusRequestEntityTooLarge, "invalid_request",
 				fmt.Sprintf("Request body exceeds %d bytes", maxRequestBodyBytes))
-			return
+			return nil, false
 		}
-		s.writeAnthropicError(w, requestID, http.StatusBadRequest, AnthropicInvalidRequest, "Failed to read request body")
-		return
+		s.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to read request body")
+		return nil, false
 	}
 	r.Body.Close()
+	return body, true
+}
 
+// extractOpenAIModel pulls the model field out of an OpenAI-style request
+// body, writing an OpenAI-shaped error on failure.
+func (s *Server) extractOpenAIModel(w http.ResponseWriter, body []byte) (string, bool) {
 	var req struct {
 		Model string `json:"model"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		s.writeAnthropicError(w, requestID, http.StatusBadRequest, AnthropicInvalidRequest, "Failed to parse request body as JSON")
-		return
+		s.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request body")
+		return "", false
 	}
-
 	if req.Model == "" {
-		s.writeAnthropicError(w, requestID, http.StatusBadRequest, AnthropicInvalidRequest, "model: Field required")
-		return
+		s.writeError(w, http.StatusBadRequest, "invalid_request", "Model field is required")
+		return "", false
 	}
-
-	// Get or load the backend.
-	// GetOrLoadBackend reserves the backend via AcquireRequest; we release on return.
-	backend, err := s.manager.GetOrLoadBackend(req.Model, nil)
-	if err != nil {
-		s.handleAnthropicModelError(w, requestID, err)
-		return
-	}
-	defer backend.ReleaseRequest()
-
-	// Proxy the request
-	backendURL := fmt.Sprintf("http://%s:%d", s.config.Host, backend.Port)
-	target, err := url.Parse(backendURL)
-	if err != nil {
-		s.writeAnthropicError(w, requestID, http.StatusInternalServerError, AnthropicAPIError, "Internal server error")
-		return
-	}
-
-	proxy := httputil.NewSingleHostReverseProxy(target)
-
-	// Handle streaming responses properly
-	proxy.FlushInterval = -1 // Flush immediately for SSE
-
-	proxy.ModifyResponse = func(resp *http.Response) error {
-		resp.Header.Set("request-id", requestID)
-		return stripCORSHeaders(resp)
-	}
-
-	// Handle backend errors
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		s.writeAnthropicError(w, requestID, http.StatusBadGateway, AnthropicAPIError, "Backend server error: "+err.Error())
-	}
-
-	// Restore the body for the proxied request
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	r.ContentLength = int64(len(body))
-	r.URL.Path = path
-
-	// Strip Anthropic auth headers before forwarding (local server doesn't need them)
-	r.Header.Del("x-api-key")
-
-	proxy.ServeHTTP(w, r)
+	return req.Model, true
 }
 
 // generateRequestID creates a unique request ID in Anthropic format
@@ -391,6 +584,16 @@ func generateRequestID() string {
 	b := make([]byte, 12)
 	_, _ = rand.Read(b)
 	return "req_" + hex.EncodeToString(b)
+}
+
+// generateMessageID creates an Anthropic-style msg_<random> ID. Kept
+// independent from requestID so clients can't use one to derive the other
+// — the two live in different namespaces (request is ephemeral; message is
+// a resource identifier).
+func generateMessageID() string {
+	b := make([]byte, 12)
+	_, _ = rand.Read(b)
+	return "msg_" + hex.EncodeToString(b)
 }
 
 // writeAnthropicError writes an Anthropic-compatible error response

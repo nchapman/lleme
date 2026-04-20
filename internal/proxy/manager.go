@@ -12,9 +12,7 @@ package proxy
 // process), it must not re-acquire it while holding b.mu.
 
 import (
-	"bufio"
 	"fmt"
-	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -25,7 +23,6 @@ import (
 
 	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/hf"
-	"github.com/nchapman/lleme/internal/llama"
 	"github.com/nchapman/lleme/internal/logs"
 )
 
@@ -113,7 +110,7 @@ func (m *ModelManager) GetOrLoadBackend(modelQuery string, options map[string]an
 		switch status := backend.GetStatus(); status {
 		case BackendReady:
 			// Check if options changed - if so, reload the model
-			if optionsChanged(backend.Options, options) {
+			if optionsChanged(backend.Runtime, backend.Options, options) {
 				// Mark as stopping to prevent race conditions
 				backend.SetStatus(BackendStopping)
 				m.mu.Unlock()
@@ -162,6 +159,14 @@ func (m *ModelManager) GetOrLoadBackend(modelQuery string, options map[string]an
 		m.mu.Lock()
 	}
 
+	// Resolve which runtime serves this model before we commit to any
+	// resources (port, LRU entry) so a bad metadata entry fails cleanly.
+	runtime, err := m.selectRuntime(result.Model.User, result.Model.Repo, result.Model.Quant)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, err
+	}
+
 	// Allocate port
 	port, err := m.portAllocator.Allocate()
 	if err != nil {
@@ -173,6 +178,7 @@ func (m *ModelManager) GetOrLoadBackend(modelQuery string, options map[string]an
 	backend = &Backend{
 		ModelName:    modelName,
 		ModelPath:    modelPath,
+		Runtime:      runtime,
 		Port:         port,
 		Status:       BackendStarting,
 		StartedAt:    time.Now(),
@@ -218,7 +224,7 @@ func (m *ModelManager) finalizeReadyBackend(modelQuery, modelName string, backen
 		m.mu.Unlock()
 		return m.GetOrLoadBackend(modelQuery, options)
 	}
-	if optionsChanged(backend.Options, options) {
+	if optionsChanged(backend.Runtime, backend.Options, options) {
 		m.mu.Unlock()
 		if err := m.StopBackend(modelName); err != nil {
 			return nil, fmt.Errorf("reload with new options: %w", err)
@@ -405,7 +411,7 @@ func (m *ModelManager) Resolver() *ModelResolver {
 	return m.resolver
 }
 
-// startBackend starts the llama-server process for a backend
+// startBackend starts the server process for a backend via its Runtime.
 func (m *ModelManager) startBackend(backend *Backend) {
 	defer func() {
 		// Ensure ReadyChan is closed even on error
@@ -414,12 +420,13 @@ func (m *ModelManager) startBackend(backend *Backend) {
 		}
 	}()
 
-	serverPath := llama.ServerPath()
-	args := m.buildArgs(backend)
+	rt := backend.Runtime
+	serverPath := rt.BinaryPath()
+	args := rt.BuildArgs(backend, m.config.Host)
 
 	cmd := exec.Command(serverPath, args...)
 	cmd.Env = os.Environ()
-	cmd.Dir = config.BinPath()
+	cmd.Dir = rt.WorkingDir()
 
 	// Create rotating log writer for this backend
 	logWriter, err := logs.NewRotatingWriter(logs.BackendLogPath(backend.ModelName))
@@ -462,96 +469,8 @@ func (m *ModelManager) startBackend(backend *Backend) {
 	}
 }
 
-func (m *ModelManager) buildArgs(backend *Backend) []string {
-	args := []string{
-		"--model", backend.ModelPath,
-		"--host", m.config.Host,
-		"--port", fmt.Sprintf("%d", backend.Port),
-		"--embeddings", // Enable /v1/embeddings endpoint
-		"--no-webui",   // Disable built-in web UI (lleme is a proxy)
-	}
-
-	// Check for mmproj file (vision model support)
-	if mmprojPath := findMMProjForModel(backend.ModelName); mmprojPath != "" {
-		args = append(args, "--mmproj", mmprojPath)
-	}
-
-	// Apply template patches to work around llama-server issues.
-	// See template.go for the patch registry and documentation.
-	if templatePath, err := ExtractAndPatchTemplate(backend.ModelPath); err == nil && templatePath != "" {
-		args = append(args, "--chat-template-file", templatePath)
-	}
-
-	// Merge config options with backend-specific options (backend overrides config)
-	mergedOptions := make(map[string]any)
-	maps.Copy(mergedOptions, m.appConfig.LlamaCpp.Options)
-	maps.Copy(mergedOptions, backend.Options)
-
-	// Pass through all llama-server options
-	args = append(args, buildLlamaServerArgs(mergedOptions)...)
-
-	return args
-}
-
-// findMMProjForModel parses the model name and checks if an mmproj file exists.
-// ModelName format: "user/repo:quant" (e.g., "ggml-org/gemma-3-4b-it-GGUF:Q4_K_M")
-func findMMProjForModel(modelName string) string {
-	parts := strings.Split(modelName, ":")
-	if len(parts) != 2 {
-		return ""
-	}
-
-	repoRef := parts[0]
-	quant := parts[1]
-
-	repoParts := strings.Split(repoRef, "/")
-	if len(repoParts) != 2 {
-		return ""
-	}
-
-	user := repoParts[0]
-	repo := repoParts[1]
-
-	return hf.FindMMProjFile(user, repo, quant)
-}
-
-// buildLlamaServerArgs converts the llama_server config map to command-line arguments.
-func buildLlamaServerArgs(config map[string]any) []string {
-	if config == nil {
-		return nil
-	}
-
-	var args []string
-	for key, value := range config {
-		flag := "--" + key
-
-		switch v := value.(type) {
-		case bool:
-			if v {
-				args = append(args, flag)
-			}
-			// false booleans are omitted (use default)
-		case int:
-			args = append(args, flag, fmt.Sprintf("%d", v))
-		case float64:
-			// YAML parses numbers as float64, check if it's a whole number
-			if v == float64(int(v)) {
-				args = append(args, flag, fmt.Sprintf("%d", int(v)))
-			} else {
-				args = append(args, flag, fmt.Sprintf("%g", v))
-			}
-		case string:
-			if v != "" {
-				args = append(args, flag, v)
-			}
-		}
-	}
-
-	return args
-}
-
 func (m *ModelManager) waitForReady(backend *Backend) error {
-	healthURL := fmt.Sprintf("http://%s:%d/health", m.config.Host, backend.Port)
+	healthURL := backend.Runtime.HealthURL(m.config.Host, backend.Port)
 	client := &http.Client{Timeout: 2 * time.Second}
 
 	logPath := logs.BackendLogPath(backend.ModelName)
@@ -568,7 +487,7 @@ func (m *ModelManager) waitForReady(backend *Backend) error {
 		}
 
 		// Check log for errors
-		if hasStartupError(logPath) {
+		if backend.Runtime.IsStartupError(logPath) {
 			return fmt.Errorf("server startup failed (check %s)", logPath)
 		}
 
@@ -576,26 +495,6 @@ func (m *ModelManager) waitForReady(backend *Backend) error {
 	}
 
 	return fmt.Errorf("server did not become ready within %v", m.config.StartupTimeout)
-}
-
-func hasStartupError(logFile string) bool {
-	file, err := os.Open(logFile)
-	if err != nil {
-		return false
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.ToLower(scanner.Text())
-		if strings.Contains(line, "error") && strings.Contains(line, "failed") {
-			return true
-		}
-		if strings.Contains(line, "could not load model") {
-			return true
-		}
-	}
-	return false
 }
 
 func (m *ModelManager) updateLRU(modelName string) {
@@ -657,7 +556,13 @@ func (e *ModelNotFoundError) Error() string {
 // optionsChanged returns true if the new options differ from the current options.
 // Only compares options that affect model loading (server options).
 // Returns false if both are nil/empty, or if they have the same values.
-func optionsChanged(current, new map[string]any) bool {
+// optionsChanged reports whether the given new options would require
+// reloading the backend currently serving the model. Uses the Runtime's
+// SignificantOptions() list so the set of reload-worthy keys is a
+// per-backend concern. Maps are normalized to kebab-case before lookup so
+// `turbo_kv` from YAML and `turbo-kv` from a CLI flag compare equal.
+// Nil / empty on either side is handled early.
+func optionsChanged(runtime Runtime, current, new map[string]any) bool {
 	// If new options are nil/empty, no change requested
 	if len(new) == 0 {
 		return false
@@ -668,12 +573,14 @@ func optionsChanged(current, new map[string]any) bool {
 		return true
 	}
 
-	// Compare the options that matter for model loading
-	serverOptions := []string{"ctx-size", "gpu-layers", "threads", "batch-size", "ubatch-size", "flash-attn", "mlock", "cache-type-k", "cache-type-v"}
-
-	for _, key := range serverOptions {
-		newVal, newExists := new[key]
-		curVal, curExists := current[key]
+	// Compare the options that matter for this runtime's model loading.
+	// Each Runtime declares its own list so changing a llama-only key
+	// doesn't trigger a reload on SwiftLM (and vice versa).
+	curNorm := normalizeOptionKeys(current)
+	newNorm := normalizeOptionKeys(new)
+	for _, key := range runtime.SignificantOptions() {
+		newVal, newExists := newNorm[key]
+		curVal, curExists := curNorm[key]
 
 		if newExists != curExists {
 			return true
@@ -684,6 +591,21 @@ func optionsChanged(current, new map[string]any) bool {
 	}
 
 	return false
+}
+
+// normalizeOptionKeys returns m with every key's `_` replaced by `-`.
+// Input maps can mix forms (YAML supplies snake_case by convention; CLI
+// flags produce kebab-case); this lets comparisons happen on a single
+// vocabulary without the caller having to normalize upstream.
+func normalizeOptionKeys(m map[string]any) map[string]any {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[strings.ReplaceAll(k, "_", "-")] = v
+	}
+	return out
 }
 
 // optionValuesEqual compares two option values, handling type coercion.

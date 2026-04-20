@@ -18,7 +18,25 @@ options:
   min-p: 0.0
 ```
 
-Keys under `options` mirror `llama-server` CLI flags in kebab-case (`--temp` → `temp`, `--top-k` → `top-k`, `--presence-penalty` → `presence-penalty`, etc.). Unknown keys are passed through to the server verbatim.
+Keys under `options` mirror `llama-server` CLI flags in kebab-case (`--temp` → `temp`, `--top-k` → `top-k`, `--presence-penalty` → `presence-penalty`, etc.). llama-server passes unknown keys through verbatim; SwiftLM (MLX) drops anything it doesn't recognize.
+
+### Backend-specific overrides
+
+Add optional `llamacpp:` or `swiftlm:` sub-blocks when a recommendation applies to only one backend:
+
+```yaml
+options:
+  temp: 0.6              # shared — both backends get this
+  top-p: 0.95
+llamacpp:
+  options:
+    mirostat: 2          # llama.cpp only
+swiftlm:
+  options:
+    turbo-kv: true       # SwiftLM only
+```
+
+Backend-specific options layer on top of the shared `options:` map for the matching runtime. An MLX load of the preset above receives `temp`, `top-p`, and `turbo-kv`; a GGUF load receives `temp`, `top-p`, and `mirostat`.
 
 ## Match patterns
 

@@ -126,6 +126,12 @@ func PullModel(client *Client, user, repo string, quant Quantization, opts *Pull
 		return nil, err
 	}
 
+	// Record the backend runtime for this quant so the proxy can dispatch
+	// to the right server without re-detecting the model format later.
+	if err := SetBackendKind(user, repo, quant.Name, BackendGGUF); err != nil {
+		return nil, fmt.Errorf("failed to record backend kind: %w", err)
+	}
+
 	return result, nil
 }
 
@@ -250,7 +256,7 @@ func downloadFromHF(client *Client, user, repo string, file *ManifestFile, destP
 		}
 	})
 
-	if _, err := downloader.DownloadModel(user, repo, "main", file.RFilename, destPath); err != nil {
+	if _, err := downloader.DownloadModel(user, repo, "main", file.RFilename, destPath, file.Size); err != nil {
 		return fmt.Errorf("download %s/%s %s: %w", user, repo, file.RFilename, err)
 	}
 	return nil

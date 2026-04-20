@@ -13,6 +13,7 @@ import (
 
 	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/fileutil"
+	"github.com/nchapman/lleme/internal/logs"
 	"github.com/nchapman/lleme/internal/version"
 	"gopkg.in/yaml.v3"
 )
@@ -41,50 +42,27 @@ func NewDownloaderWithProgress(client *Client, progress ProgressCallback) *Downl
 	}
 }
 
-func (d *Downloader) DownloadModel(user, repo, branch, filename string, destPath string) (*DownloadProgress, error) {
-	url := fmt.Sprintf("%s/%s/%s/resolve/%s/%s", baseURL, user, repo, branch, filename)
-
+// DownloadModel streams a file from HuggingFace to destPath. expectedSize
+// (bytes) is the manifest-declared size; when non-zero it caps the total
+// bytes written at 2× the declared size as a defense against a misbehaving
+// or malicious backend streaming unbounded content. Zero disables the cap.
+func (d *Downloader) DownloadModel(user, repo, branch, filename, destPath string, expectedSize int64) (*DownloadProgress, error) {
 	partialPath := destPath + ".partial"
-	fileSize := int64(0)
+	existing := existingPartialSize(partialPath)
 
-	if info, err := os.Stat(partialPath); err == nil {
-		fileSize = info.Size()
-	}
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("User-Agent", version.UserAgent())
-	if d.client.token != "" {
-		req.Header.Set("Authorization", "Bearer "+d.client.token)
-	}
-
-	if fileSize > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", fileSize))
-	}
-
-	resp, err := d.client.downloadClient.Do(req)
+	resp, err := d.dispatchDownload(user, repo, branch, filename, existing)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	totalSize := existing + resp.ContentLength
+	sizeCap, err := enforceSizeCap(filename, expectedSize, totalSize)
+	if err != nil {
+		return nil, err
 	}
 
-	totalSize := fileSize + resp.ContentLength
-
-	flags := os.O_CREATE | os.O_WRONLY
-	if resp.StatusCode == http.StatusOK {
-		flags |= os.O_TRUNC
-	} else {
-		flags |= os.O_APPEND
-	}
-
-	file, err := os.OpenFile(partialPath, flags, 0644)
+	file, err := openDownloadFile(partialPath, resp.StatusCode)
 	if err != nil {
 		return nil, err
 	}
@@ -92,8 +70,113 @@ func (d *Downloader) DownloadModel(user, repo, branch, filename string, destPath
 
 	d.startTime = time.Now()
 	d.lastUpdate = d.startTime
-	d.lastBytes = fileSize
+	d.lastBytes = existing
 
+	written, err := d.streamBody(resp.Body, file, existing, totalSize, sizeCap)
+	if err != nil {
+		_ = file.Close()
+		_ = os.Remove(partialPath)
+		return nil, fmt.Errorf("download %s: %w", filename, err)
+	}
+
+	file.Close()
+	if err := os.Rename(partialPath, destPath); err != nil {
+		return nil, err
+	}
+	return d.calculateProgress(written, totalSize), nil
+}
+
+// existingPartialSize returns the current size of a .partial file, or 0 if
+// none exists. Nonzero values cause the request to resume with Range.
+func existingPartialSize(partialPath string) int64 {
+	if info, err := os.Stat(partialPath); err == nil {
+		return info.Size()
+	}
+	return 0
+}
+
+// dispatchDownload issues the GET request, resuming from existing bytes
+// via a Range header when nonzero. Returns the response for the caller to
+// stream. Non-2xx statuses are surfaced as an error.
+func (d *Downloader) dispatchDownload(user, repo, branch, filename string, existing int64) (*http.Response, error) {
+	url := fmt.Sprintf("%s/%s/%s/resolve/%s/%s", baseURL, user, repo, branch, filename)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", version.UserAgent())
+	if d.client.token != "" {
+		req.Header.Set("Authorization", "Bearer "+d.client.token)
+	}
+	if existing > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", existing))
+	}
+
+	resp, err := d.client.downloadClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		resp.Body.Close()
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return resp, nil
+}
+
+// sizeCapSlackBytes is the additive slack on top of 2× the declared size.
+// Covers minor server-side re-packing (shard boundary bytes, metadata
+// shuffles) without needing a precise match.
+const sizeCapSlackBytes = 1 << 20 // 1 MiB
+
+// maxExpectedSize is the largest declared size we'll accept before refusing
+// the download outright. Two reasons for the clamp:
+//  1. Overflow safety — `expectedSize*2 + slack` must stay within int64, and
+//     `sizeCap+1` (used by the LimitReader in streamBody) must too. Anything
+//     below (MaxInt64 − slack) / 2 is safe on both counts.
+//  2. Sanity — no model file legitimately approaches 4 EiB. A manifest
+//     claiming otherwise is malicious or corrupt; failing fast is better
+//     than trying to be clever. 1 TiB covers real LLM shards with 1000×
+//     headroom against today's largest open-weight models.
+const maxExpectedSize int64 = 1 << 40 // 1 TiB
+
+// enforceSizeCap computes the tolerated cap (2× expected + slack) and
+// fails fast when the declared Content-Length already exceeds it. Returns
+// the cap value (0 when disabled) so the streaming path can enforce the
+// streamed-bytes check against the same number. Refuses pathological
+// expectedSize values to keep the arithmetic and the LimitReader(cap+1)
+// bound inside int64.
+func enforceSizeCap(filename string, expectedSize, totalSize int64) (int64, error) {
+	if expectedSize <= 0 {
+		return 0, nil
+	}
+	if expectedSize > maxExpectedSize {
+		return 0, fmt.Errorf("download %s: declared size %d exceeds sanity limit %d", filename, expectedSize, maxExpectedSize)
+	}
+	// Safe from overflow because expectedSize ≤ maxExpectedSize (2^40);
+	// 2×2^40 + 1 MiB is well under MaxInt64 (~9.2×10^18).
+	sizeCap := expectedSize*2 + sizeCapSlackBytes
+	if totalSize > sizeCap {
+		return 0, fmt.Errorf("download %s: declared %d exceeds cap of %d (expected %d)", filename, totalSize, sizeCap, expectedSize)
+	}
+	return sizeCap, nil
+}
+
+// openDownloadFile opens the .partial file for the download, choosing
+// truncate vs. append based on whether we got a full or partial response.
+func openDownloadFile(partialPath string, statusCode int) (*os.File, error) {
+	flags := os.O_CREATE | os.O_WRONLY
+	if statusCode == http.StatusOK {
+		flags |= os.O_TRUNC
+	} else {
+		flags |= os.O_APPEND
+	}
+	return os.OpenFile(partialPath, flags, 0644)
+}
+
+// streamBody writes resp.Body to file, enforcing the per-file size cap via
+// LimitReader(cap+1) + post-stream byte count. A lying Content-Length
+// can't fill the disk because the LimitReader terminates at cap+1.
+func (d *Downloader) streamBody(body io.Reader, file io.Writer, existing, totalSize, sizeCap int64) (int64, error) {
 	var progressFn func(int64, int64)
 	if d.progress != nil {
 		progressFn = func(written, total int64) {
@@ -101,20 +184,17 @@ func (d *Downloader) DownloadModel(user, repo, branch, filename string, destPath
 			d.progress(p.Downloaded, p.Total, p.Speed, p.ETA)
 		}
 	}
-
-	written, err := fileutil.StreamBody(resp.Body, file, fileSize, totalSize, progressFn)
+	if sizeCap > 0 {
+		body = io.LimitReader(body, sizeCap+1)
+	}
+	written, err := fileutil.StreamBody(body, file, existing, totalSize, progressFn)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-
-	file.Close()
-
-	if err := os.Rename(partialPath, destPath); err != nil {
-		return nil, err
+	if sizeCap > 0 && written > sizeCap {
+		return 0, fmt.Errorf("exceeded size cap of %d bytes", sizeCap)
 	}
-
-	progress := d.calculateProgress(written, totalSize)
-	return progress, nil
+	return written, nil
 }
 
 func (d *Downloader) calculateProgress(downloaded, total int64) *DownloadProgress {
@@ -247,6 +327,10 @@ type ModelMetadata struct {
 type QuantMetadata struct {
 	LastUsed     time.Time `yaml:"last_used,omitempty"`
 	DownloadedAt time.Time `yaml:"downloaded_at,omitempty"`
+	// Backend identifies the runtime that serves this quant: "gguf" or "mlx".
+	// Empty in legacy metadata files — treat as "gguf" (the only kind lleme
+	// could pull before MLX support landed).
+	Backend string `yaml:"backend,omitempty"`
 }
 
 // GetMetadataPath returns the path to the metadata.yaml file for a model repo.
@@ -283,6 +367,88 @@ func SaveMetadata(user, repo string, meta *ModelMetadata) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0644)
+}
+
+// SetBackendKind records the runtime kind ("gguf" or "mlx") for a quant in
+// metadata.yaml. Called at pull time so the proxy can pick the right backend
+// without re-detecting the model format.
+func SetBackendKind(user, repo, quant, kind string) error {
+	meta, err := LoadMetadata(user, repo)
+	if err != nil {
+		return err
+	}
+
+	q := meta.Quants[quant]
+	q.Backend = kind
+	if q.DownloadedAt.IsZero() {
+		q.DownloadedAt = time.Now()
+	}
+	meta.Quants[quant] = q
+
+	return SaveMetadata(user, repo, meta)
+}
+
+// Known backend kinds as persisted in metadata.yaml. These identify the
+// on-disk model format; the proxy maps them to a concrete Runtime.
+const (
+	BackendGGUF = "gguf"
+	BackendMLX  = "mlx"
+)
+
+// BackendKindForModelName parses a "user/repo:quant" reference and resolves
+// its backend kind via metadata.yaml. Falls back to BackendGGUF for any
+// parse or read error — callers treat the result as a hint for layering
+// backend-specific options, not an authoritative runtime selection.
+func BackendKindForModelName(fullName string) string {
+	colon := strings.LastIndex(fullName, ":")
+	if colon < 0 {
+		return BackendGGUF
+	}
+	repoPart, quant := fullName[:colon], fullName[colon+1:]
+	slash := strings.Index(repoPart, "/")
+	if slash < 0 {
+		return BackendGGUF
+	}
+	kind, err := GetBackendKind(repoPart[:slash], repoPart[slash+1:], quant)
+	if err != nil {
+		// Genuinely corrupt / unreadable metadata lands here; the "missing
+		// file" case returns (BackendGGUF, nil) and stays silent. Warn so a
+		// user seeing the wrong runtime dispatched to an MLX model has a
+		// log entry to correlate with.
+		logs.Warn("BackendKindForModelName falling back to gguf", "model", fullName, "error", err)
+		return BackendGGUF
+	}
+	return kind
+}
+
+// GetBackendKind returns the recorded backend kind for a quant. A missing
+// metadata file or an empty `backend:` field resolves to "gguf" (the only
+// format lleme supported before MLX). I/O and parse errors are propagated
+// so callers can surface them instead of silently falling back. Any
+// unrecognized backend string in the file is an error — metadata.yaml is
+// local, but corrupt / tampered content shouldn't silently dispatch to a
+// default runtime.
+func GetBackendKind(user, repo, quant string) (string, error) {
+	meta, err := LoadMetadata(user, repo)
+	if err != nil {
+		return "", err
+	}
+	q, ok := meta.Quants[quant]
+	if !ok || q.Backend == "" {
+		return BackendGGUF, nil
+	}
+	return parseBackendKind(q.Backend)
+}
+
+// parseBackendKind accepts only the known kinds. Keeps the on-disk
+// vocabulary narrow so downstream switches don't have to re-validate.
+func parseBackendKind(s string) (string, error) {
+	switch s {
+	case BackendGGUF, BackendMLX:
+		return s, nil
+	default:
+		return "", fmt.Errorf("unrecognized backend kind %q", s)
+	}
 }
 
 // TouchLastUsed updates the last used timestamp for a model.

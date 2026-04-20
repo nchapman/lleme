@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/nchapman/lleme/internal/hf"
 	"github.com/nchapman/lleme/internal/presets"
 	"github.com/nchapman/lleme/internal/server"
 	"github.com/nchapman/lleme/internal/tui/components"
@@ -136,12 +137,13 @@ func (m *Model) handleReload() CommandResultMsg {
 		return CommandResultMsg{Message: fmt.Sprintf("Failed to stop model: %v", err), IsError: true}
 	}
 
+	kind := hf.BackendKindForModelName(m.model)
 	var personaOpts map[string]any
 	if m.persona != nil {
-		personaOpts = m.persona.GetServerOptions()
+		personaOpts = m.persona.GetServerOptions(kind)
 	}
 	opts := &server.RunOptions{
-		Options: presets.MergeServerOptions(m.preset, personaOpts),
+		Options: presets.MergeServerOptions(m.preset, personaOpts, kind),
 	}
 	if m.options.CtxSizeSet {
 		opts.CtxSize = server.IntPtr(m.options.CtxSize)

@@ -121,6 +121,18 @@ type Manifest struct {
 	SplitFiles []*ManifestFile `json:"splitFiles,omitempty"` // Additional split files (local augmentation)
 }
 
+// hfAllowedHosts is the set of hosts the HuggingFace download client is
+// permitted to contact, including the LFS CDN that huggingface.co redirects
+// to for large files. Any other host on a redirect chain fails closed.
+var hfAllowedHosts = map[string]bool{
+	"huggingface.co":          true,
+	"hf.co":                   true,
+	"cdn-lfs.huggingface.co":  true,
+	"cdn-lfs.hf.co":           true,
+	"cas-bridge.xethub.hf.co": true,
+	"cas-server.xethub.hf.co": true,
+}
+
 func NewClient(cfg *config.Config) *Client {
 	return &Client{
 		httpClient: &http.Client{
@@ -129,6 +141,21 @@ func NewClient(cfg *config.Config) *Client {
 		downloadClient: &http.Client{
 			Transport: &http.Transport{
 				ResponseHeaderTimeout: 30 * time.Second,
+			},
+			// Validate every redirect hop. Without this, a compromised HF
+			// response could 302 the download to an arbitrary host and the
+			// Authorization header would follow.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if !hfAllowedHosts[req.URL.Hostname()] {
+					return fmt.Errorf("redirect blocked: %s is not on the HuggingFace download allowlist", req.URL.Hostname())
+				}
+				if req.URL.Scheme != "https" {
+					return fmt.Errorf("redirect blocked: scheme %q is not https", req.URL.Scheme)
+				}
+				if len(via) >= 10 {
+					return fmt.Errorf("too many redirects")
+				}
+				return nil
 			},
 		},
 		token: getToken(cfg),
@@ -242,12 +269,20 @@ func (c *Client) ListFilesInPath(user, repo, branch, path string) ([]FileTree, e
 	return files, nil
 }
 
-func (c *Client) SearchModels(query string, limit int) ([]SearchResult, error) {
-	// Use models-json endpoint with apps=llama.cpp filter for llama.cpp compatible models
-	searchURL := fmt.Sprintf("%s/models-json?apps=llama.cpp&sort=trending", baseURL)
-	if query != "" {
-		searchURL += "&search=" + url.QueryEscape(query)
+// SearchModels queries HuggingFace's models-json endpoint. apps filters to
+// compatible runtimes (e.g. "llama.cpp", "mlx-lm"); callers typically join
+// the names of all registered backends. An empty apps is allowed but
+// unfiltered results are noisy, so callers should pass something.
+func (c *Client) SearchModels(query string, limit int, apps []string) ([]SearchResult, error) {
+	params := url.Values{}
+	params.Set("sort", "trending")
+	if len(apps) > 0 {
+		params.Set("apps", strings.Join(apps, ","))
 	}
+	if query != "" {
+		params.Set("search", query)
+	}
+	searchURL := fmt.Sprintf("%s/models-json?%s", baseURL, params.Encode())
 	req, err := http.NewRequest("GET", searchURL, nil)
 	if err != nil {
 		return nil, err

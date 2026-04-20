@@ -394,14 +394,14 @@ func TestRepoName(t *testing.T) {
 
 func TestMergeServerOptions(t *testing.T) {
 	t.Run("both nil returns nil", func(t *testing.T) {
-		if got := MergeServerOptions(nil, nil); got != nil {
+		if got := MergeServerOptions(nil, nil, ""); got != nil {
 			t.Errorf("expected nil, got %v", got)
 		}
 	})
 
 	t.Run("preset only", func(t *testing.T) {
 		p := &Preset{Options: map[string]any{"temp": 0.7, "top-k": 20}}
-		got := MergeServerOptions(p, nil)
+		got := MergeServerOptions(p, nil, "")
 		if got == nil {
 			t.Fatal("expected non-nil")
 		}
@@ -414,7 +414,7 @@ func TestMergeServerOptions(t *testing.T) {
 	})
 
 	t.Run("persona only", func(t *testing.T) {
-		got := MergeServerOptions(nil, map[string]any{"ctx-size": 4096})
+		got := MergeServerOptions(nil, map[string]any{"ctx-size": 4096}, "")
 		if got == nil {
 			t.Fatal("expected non-nil")
 		}
@@ -426,7 +426,7 @@ func TestMergeServerOptions(t *testing.T) {
 	t.Run("persona wins over preset on conflict", func(t *testing.T) {
 		p := &Preset{Options: map[string]any{"temp": 0.7, "top-k": 20}}
 		persona := map[string]any{"temp": 0.5, "ctx-size": 4096}
-		got := MergeServerOptions(p, persona)
+		got := MergeServerOptions(p, persona, "")
 		if got["temp"] != 0.5 {
 			t.Errorf("temp = %v, want 0.5 (persona wins)", got["temp"])
 		}
@@ -441,7 +441,7 @@ func TestMergeServerOptions(t *testing.T) {
 	t.Run("returned map is independent of inputs", func(t *testing.T) {
 		p := &Preset{Options: map[string]any{"temp": 0.7}}
 		persona := map[string]any{"top-k": 20}
-		got := MergeServerOptions(p, persona)
+		got := MergeServerOptions(p, persona, "")
 		got["injected"] = true
 		if _, ok := p.Options["injected"]; ok {
 			t.Error("mutation affected preset")
@@ -454,7 +454,7 @@ func TestMergeServerOptions(t *testing.T) {
 
 func TestGetOptions(t *testing.T) {
 	p := &Preset{Options: map[string]any{"temp": 0.7, "top-k": 20}}
-	got := p.GetOptions()
+	got := p.GetOptions("")
 	if got == nil {
 		t.Fatal("expected non-nil options")
 	}
@@ -465,7 +465,86 @@ func TestGetOptions(t *testing.T) {
 	}
 
 	var nilPreset *Preset
-	if nilPreset.GetOptions() != nil {
+	if nilPreset.GetOptions("") != nil {
 		t.Error("nil preset GetOptions should return nil")
+	}
+}
+
+func TestGetOptionsBackendSpecific(t *testing.T) {
+	p := &Preset{
+		Options:  map[string]any{"temp": 0.6, "top-p": 0.95},
+		LlamaCpp: PresetBackendSection{Options: map[string]any{"mirostat": 2, "temp": 0.5}},
+		SwiftLM:  PresetBackendSection{Options: map[string]any{"turbo-kv": true}},
+	}
+
+	// gguf: shared + llamacpp (llamacpp wins on conflict).
+	got := p.GetOptions("gguf")
+	if got["temp"] != 0.5 {
+		t.Errorf("gguf temp = %v, want 0.5 (llamacpp overrides shared)", got["temp"])
+	}
+	if got["top-p"] != 0.95 {
+		t.Errorf("gguf top-p = %v, want 0.95 (from shared)", got["top-p"])
+	}
+	if got["mirostat"] != 2 {
+		t.Errorf("gguf mirostat = %v, want 2", got["mirostat"])
+	}
+	if _, ok := got["turbo-kv"]; ok {
+		t.Error("gguf should not contain swiftlm-only turbo-kv")
+	}
+
+	// mlx: shared + swiftlm, no llamacpp bleed.
+	got = p.GetOptions("mlx")
+	if got["turbo-kv"] != true {
+		t.Errorf("mlx turbo-kv = %v, want true", got["turbo-kv"])
+	}
+	if _, ok := got["mirostat"]; ok {
+		t.Error("mlx should not contain llamacpp-only mirostat")
+	}
+	if got["temp"] != 0.6 {
+		t.Errorf("mlx temp = %v, want 0.6 (shared, no swiftlm override)", got["temp"])
+	}
+
+	// unknown/empty kind: shared only.
+	got = p.GetOptions("")
+	if _, ok := got["mirostat"]; ok {
+		t.Error("empty kind leaked llamacpp options")
+	}
+	if _, ok := got["turbo-kv"]; ok {
+		t.Error("empty kind leaked swiftlm options")
+	}
+}
+
+func TestMergeServerOptionsLayering(t *testing.T) {
+	p := &Preset{
+		Options:  map[string]any{"temp": 0.6},
+		LlamaCpp: PresetBackendSection{Options: map[string]any{"mirostat": 2}},
+	}
+	persona := map[string]any{"temp": 0.9, "ctx-size": 8192}
+
+	got := MergeServerOptions(p, persona, "gguf")
+	if got["temp"] != 0.9 {
+		t.Errorf("temp = %v, want 0.9 (persona wins)", got["temp"])
+	}
+	if got["mirostat"] != 2 {
+		t.Errorf("mirostat = %v, want 2 (from preset.llamacpp)", got["mirostat"])
+	}
+	if got["ctx-size"] != 8192 {
+		t.Errorf("ctx-size = %v, want 8192 (from persona)", got["ctx-size"])
+	}
+}
+
+// Persona backend-specific options (already folded into personaOpts by the
+// caller via Persona.GetServerOptions(kind)) must win over preset's own
+// backend-specific layer. This is the load-bearing guarantee of the four-
+// layer precedence.
+func TestMergeServerOptionsPersonaBackendOverridesPresetBackend(t *testing.T) {
+	p := &Preset{
+		LlamaCpp: PresetBackendSection{Options: map[string]any{"mirostat": 2}},
+	}
+	personaOpts := map[string]any{"mirostat": 1} // simulates persona.SwiftLM already merged
+
+	got := MergeServerOptions(p, personaOpts, "gguf")
+	if got["mirostat"] != 1 {
+		t.Errorf("mirostat = %v, want 1 (persona backend beats preset backend)", got["mirostat"])
 	}
 }

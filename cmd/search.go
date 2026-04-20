@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/hf"
@@ -12,9 +13,9 @@ import (
 
 var searchCmd = &cobra.Command{
 	Use:     "search [query]",
-	Short:   "Search Hugging Face for GGUF models",
+	Short:   "Search Hugging Face for compatible models",
 	GroupID: "discovery",
-	Long:    "Search Hugging Face for GGUF models. If no query is provided, shows trending models.",
+	Long:    "Search Hugging Face for models compatible with any registered backend (GGUF and MLX today). If no query is provided, shows trending models.",
 	Args:    cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		cfg, err := config.Load()
@@ -28,7 +29,8 @@ var searchCmd = &cobra.Command{
 			query = args[0]
 		}
 
-		results, err := client.SearchModels(query, 20)
+		apps := proxy.HFAppNames()
+		results, err := client.SearchModels(query, 20, apps)
 		if err != nil {
 			ui.Fatal("Failed to search: %v", err)
 		}
@@ -43,7 +45,7 @@ var searchCmd = &cobra.Command{
 			fmt.Println("Tips:")
 			fmt.Println("  Try a different search term")
 			fmt.Println("  Check spelling")
-			fmt.Println("  Browse Hugging Face: https://huggingface.co/models?apps=llama.cpp")
+			fmt.Printf("  Browse Hugging Face: https://huggingface.co/models?apps=%s&sort=trending\n", strings.Join(apps, ","))
 			return
 		}
 

@@ -74,6 +74,51 @@ func TestLlamaCppCredit(t *testing.T) {
 	}
 }
 
+func TestSwiftLMCredit(t *testing.T) {
+	result := SwiftLMCredit("b517")
+	if !strings.Contains(result, "SwiftLM") || !strings.Contains(result, "b517") {
+		t.Errorf("SwiftLMCredit = %q, want to include SwiftLM and version", result)
+	}
+}
+
+func TestBackendsCredit(t *testing.T) {
+	tests := []struct {
+		name       string
+		llama      string
+		swiftlm    string
+		wantEmpty  bool
+		wantSubstr []string
+	}{
+		{name: "both tags", llama: "b1234", swiftlm: "b517", wantSubstr: []string{"llama.cpp b1234", "SwiftLM b517", "•"}},
+		{name: "llama only", llama: "b1234", wantSubstr: []string{"llama.cpp b1234"}},
+		{name: "swiftlm only", swiftlm: "b517", wantSubstr: []string{"SwiftLM b517"}},
+		{name: "neither", wantEmpty: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BackendsCredit(tt.llama, tt.swiftlm)
+			if tt.wantEmpty {
+				if got != "" {
+					t.Errorf("BackendsCredit() = %q, want empty", got)
+				}
+				return
+			}
+			for _, s := range tt.wantSubstr {
+				if !strings.Contains(got, s) {
+					t.Errorf("BackendsCredit() = %q, want to contain %q", got, s)
+				}
+			}
+			// Never print a naked "llama.cpp " or "SwiftLM " with no tag.
+			if tt.llama == "" && strings.Contains(got, "llama.cpp") {
+				t.Errorf("should omit llama.cpp when empty tag: %q", got)
+			}
+			if tt.swiftlm == "" && strings.Contains(got, "SwiftLM") {
+				t.Errorf("should omit SwiftLM when empty tag: %q", got)
+			}
+		})
+	}
+}
+
 func TestIconConstants(t *testing.T) {
 	if IconCheck == "" {
 		t.Error("Expected IconCheck to be non-empty")

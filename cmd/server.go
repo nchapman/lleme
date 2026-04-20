@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/nchapman/lleme/internal/config"
-	"github.com/nchapman/lleme/internal/llama"
 	"github.com/nchapman/lleme/internal/logs"
 	"github.com/nchapman/lleme/internal/proxy"
 	"github.com/nchapman/lleme/internal/ui"
@@ -68,13 +67,8 @@ Use --host, --port, and --max-models to override the values from config.`,
 		if err := validateServerFlags(); err != nil {
 			ui.Fatal("%v", err)
 		}
-		if !llama.IsInstalled() {
-			fmt.Println("Installing llama.cpp...")
-			fmt.Println()
-			if _, err := llama.InstallLatest(func(msg string) { fmt.Println(msg) }); err != nil {
-				ui.Fatal("Failed to install llama.cpp: %v", err)
-			}
-			fmt.Println()
+		if err := ensureBackends(backendsForLocalModels()); err != nil {
+			ui.Fatal("%v", err)
 		}
 	},
 	Run: func(cmd *cobra.Command, args []string) {
@@ -287,9 +281,8 @@ func startServerForeground() {
 	fmt.Printf("  %-12s %s %s\n", "Status", ui.Muted("GET"), "/api/status")
 	fmt.Println()
 
-	installed, _ := llama.GetInstalledVersion()
-	if installed != nil {
-		fmt.Println(ui.LlamaCppCredit(installed.TagName))
+	if credit := ui.BackendsCredit(installedBackendTags()); credit != "" {
+		fmt.Println(credit)
 	}
 	fmt.Println(ui.Muted("Press Ctrl+C to stop"))
 
