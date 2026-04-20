@@ -3,8 +3,15 @@ package normalize
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 )
+
+// ErrResponseTooLarge is returned when a backend response body exceeds
+// maxBufferedResponseBytes. Surfaced rather than silently truncated so
+// the caller can return a clear error instead of a corrupt payload.
+var ErrResponseTooLarge = errors.New("normalize: backend response exceeded size cap")
 
 // maxBufferedResponseBytes caps the size of a non-streaming backend
 // response body the proxy will buffer in memory. A misbehaving or
@@ -41,9 +48,15 @@ func (b *bufferedReader) Read(p []byte) (int, error) {
 
 func (b *bufferedReader) load() error {
 	b.loaded = true
-	body, err := io.ReadAll(io.LimitReader(b.upstream, maxBufferedResponseBytes))
+	// Read one byte past the cap so we can detect overflow. Plain
+	// io.LimitReader silently truncates, which would yield a partial
+	// (likely invalid) JSON body served with a 200 status.
+	body, err := io.ReadAll(io.LimitReader(b.upstream, maxBufferedResponseBytes+1))
 	if err != nil {
 		return err
+	}
+	if len(body) > maxBufferedResponseBytes {
+		return fmt.Errorf("%w (limit: %d bytes)", ErrResponseTooLarge, maxBufferedResponseBytes)
 	}
 	b.buf = bytes.NewReader(normalizeResponseBody(body, b.opts))
 	return nil

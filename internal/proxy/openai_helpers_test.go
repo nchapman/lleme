@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -71,21 +72,28 @@ func TestRequestWantsStream(t *testing.T) {
 }
 
 func TestOpenAIErrorTypeForStatus(t *testing.T) {
+	// Short-form types match the rest of the proxy's writeError call
+	// sites (see "invalid_request" / "not_found" / "server_error" /
+	// "method_not_allowed" elsewhere in server.go). Aligning to one
+	// taxonomy now; canonicalizing the whole proxy to OpenAI's
+	// "*_error" suffix forms is a separate change.
 	tests := []struct {
 		status int
 		want   string
 	}{
-		{http.StatusBadRequest, "invalid_request_error"},
+		{http.StatusBadRequest, "invalid_request"},
 		{http.StatusUnauthorized, "authentication_error"},
 		{http.StatusForbidden, "permission_error"},
-		{http.StatusNotFound, "not_found_error"},
-		{http.StatusRequestEntityTooLarge, "invalid_request_error"},
-		{http.StatusTooManyRequests, "rate_limit_error"},
+		{http.StatusNotFound, "not_found"},
+		{http.StatusMethodNotAllowed, "method_not_allowed"},
+		{http.StatusRequestEntityTooLarge, "invalid_request"},
+		{http.StatusUnprocessableEntity, "invalid_request"},
+		{http.StatusTooManyRequests, "rate_limit"},
 		{http.StatusServiceUnavailable, "server_error"},
 		{http.StatusInternalServerError, "server_error"},
 		{http.StatusBadGateway, "server_error"},
-		{418, "invalid_request_error"}, // unmapped 4xx → invalid_request_error
-		{599, "server_error"},          // unmapped 5xx → server_error
+		{418, "invalid_request"}, // unmapped 4xx → invalid_request
+		{599, "server_error"},    // unmapped 5xx → server_error
 	}
 	for _, tt := range tests {
 		t.Run(http.StatusText(tt.status), func(t *testing.T) {
@@ -237,7 +245,7 @@ func TestWriteNormalizedResponseSetsContentLength(t *testing.T) {
 	resp.Header.Set("Content-Length", "999") // wrong — should be replaced
 
 	w := httptest.NewRecorder()
-	writeNormalizedResponse(w, resp, bytes.NewReader(body))
+	(&Server{}).writeNormalizedResponse(w, resp, bytes.NewReader(body))
 
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", w.Code)
@@ -251,6 +259,35 @@ func TestWriteNormalizedResponseSetsContentLength(t *testing.T) {
 		t.Errorf("body len = %d, want %d", w.Body.Len(), len(body))
 	}
 }
+
+// TestWriteNormalizedResponseEmitsOpenAIErrorOnReadFailure: when the
+// normalize/buffered reader fails (e.g. ErrResponseTooLarge from a
+// runaway backend), clients must still receive a valid OpenAI error
+// envelope rather than a plain-text http.Error body.
+func TestWriteNormalizedResponseEmitsOpenAIErrorOnReadFailure(t *testing.T) {
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}}
+	w := httptest.NewRecorder()
+
+	(&Server{}).writeNormalizedResponse(w, resp, errReader{err: errors.New("simulated")})
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	var got OpenAIError
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response not valid OpenAI error JSON: %v\nbody=%s", err, w.Body.String())
+	}
+	if got.Error.Type != "server_error" {
+		t.Errorf("error type = %q, want server_error", got.Error.Type)
+	}
+}
+
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
 
 // TestWriteNormalizedStreamSetsSSEHeaders — confirms the streaming
 // path overrides backend headers with SSE-correct values, regardless

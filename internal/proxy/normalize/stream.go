@@ -58,15 +58,21 @@ func (s *streamReader) Read(p []byte) (int, error) {
 	return s.out.Read(p)
 }
 
-// Frame-buffer caps. A misbehaving backend that emits a single
-// multi-GB line, or an event with a runaway number of lines, would
-// otherwise grow our per-frame buffer without bound. The numbers are
-// generous against real traffic — a long reasoning trace or a tool
-// call with a serialized 1 MiB JSON argument blob still fits — but
-// finite enough to keep one bad backend from killing the proxy.
+// Frame-buffer caps. Three independent bounds — per-line, per-frame
+// total bytes, and per-frame line count — keep one bad backend from
+// killing the proxy regardless of which dimension it abuses. Without
+// the per-frame total, a runaway backend could pack many near-max
+// lines into one frame and consume far more than maxStreamLineBytes.
+//
+// Numbers are generous against real traffic: a single chat-completion
+// chunk with a long reasoning trace or a serialized 1 MiB tool-call
+// argument blob fits in maxStreamLineBytes; backends emit ~1-3 lines
+// per frame in practice (data: + maybe id:/event:), well under
+// maxStreamFrameLines.
 const (
-	maxStreamLineBytes  = 8 * 1024 * 1024
-	maxStreamFrameLines = 1024
+	maxStreamLineBytes  = 8 * 1024 * 1024  // single line cap
+	maxStreamFrameBytes = 16 * 1024 * 1024 // total bytes across all lines in a frame
+	maxStreamFrameLines = 128              // line count
 )
 
 // pumpFrame reads one SSE frame from upstream, normalizes it, and
@@ -89,6 +95,7 @@ const (
 // JSON payload would corrupt downstream parsing.
 func (s *streamReader) pumpFrame() error {
 	var lines [][]byte
+	frameBytes := 0
 	sawAnyLine := false
 	for {
 		line, err := readLineCapped(s.reader, maxStreamLineBytes)
@@ -99,8 +106,12 @@ func (s *streamReader) pumpFrame() error {
 				return s.emitFrame(lines)
 			}
 			lines = append(lines, line)
+			frameBytes += len(line)
 			if len(lines) > maxStreamFrameLines {
 				return fmt.Errorf("normalize: SSE frame exceeded %d lines", maxStreamFrameLines)
+			}
+			if frameBytes > maxStreamFrameBytes {
+				return fmt.Errorf("normalize: SSE frame exceeded %d bytes", maxStreamFrameBytes)
 			}
 		}
 		if err == io.EOF {

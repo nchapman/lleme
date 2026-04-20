@@ -2,6 +2,7 @@ package normalize
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -93,24 +94,24 @@ func TestWrapDispatch(t *testing.T) {
 	})
 }
 
-// TestBufferedRespectsResponseSizeCap — verifies the io.LimitReader
-// guard against a backend returning an oversized non-streaming
-// response. Without the cap, io.ReadAll would buffer indefinitely.
-// We don't try to assert a specific byte count post-cap; just that
-// the loader returns without consuming the entire infinite source.
+// TestBufferedRespectsResponseSizeCap — verifies the size-cap guard
+// against a backend returning an oversized non-streaming response.
+// Without the cap, io.ReadAll would buffer indefinitely. The loader
+// must surface ErrResponseTooLarge instead of silently truncating
+// (which would yield a partial/invalid JSON body served as 200).
 func TestBufferedRespectsResponseSizeCap(t *testing.T) {
-	// infiniteReader yields 'x' forever — io.ReadAll without a cap
-	// would never return.
 	r := newBufferedReader(infiniteReader{}, Options{})
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	go func() {
-		_, _ = io.ReadAll(r)
-		close(done)
+		_, err := io.ReadAll(r)
+		done <- err
 	}()
 	select {
-	case <-done:
-		// load() returned: cap worked.
-	case <-time.After(2 * time.Second):
+	case err := <-done:
+		if !errors.Is(err, ErrResponseTooLarge) {
+			t.Fatalf("expected ErrResponseTooLarge, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
 		t.Fatal("buffered loader did not honor size cap (infinite read)")
 	}
 }

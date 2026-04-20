@@ -140,6 +140,29 @@ func TestStreamIdempotent(t *testing.T) {
 	}
 }
 
+// TestStreamRejectsRunawayFrame — a frame whose lines individually
+// fit under the per-line cap but whose total exceeds the per-frame
+// cap must still be rejected. Without the per-frame total bound, a
+// backend could pack many near-max lines into one event and OOM us
+// before any individual line tripped maxStreamLineBytes.
+func TestStreamRejectsRunawayFrame(t *testing.T) {
+	// Each line ~6 MiB (under 8 MiB per-line cap). Three of them
+	// sum to ~18 MiB (over 16 MiB per-frame cap). No blank line —
+	// we want to trip the frame cap before EOF or terminator.
+	chunk := strings.Repeat("x", 6*1024*1024)
+	in := "data: " + chunk + "\n" +
+		"data: " + chunk + "\n" +
+		"data: " + chunk + "\n"
+	r := newStreamReader(strings.NewReader(in), Options{})
+	_, err := io.ReadAll(r)
+	if err == nil {
+		t.Fatal("expected error on oversized frame, got nil")
+	}
+	if !strings.Contains(err.Error(), "frame exceeded") {
+		t.Errorf("error should mention frame size cap; got: %v", err)
+	}
+}
+
 // TestStreamRejectsRunawayLine — a single SSE line with no
 // terminator forever (or one larger than the cap) must be rejected
 // rather than buffered to OOM. We use a small synthetic cap test by

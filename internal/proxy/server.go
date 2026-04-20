@@ -349,7 +349,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeNormalizedStream(w, resp, wrapped)
 		return
 	}
-	writeNormalizedResponse(w, resp, wrapped)
+	s.writeNormalizedResponse(w, resp, wrapped)
 }
 
 // requestWantsStream reads only the "stream" field from a request body.
@@ -400,15 +400,17 @@ func writeNormalizedStream(w http.ResponseWriter, resp *http.Response, body io.R
 // Content-Length to the rewritten length, and writes the response. The
 // upstream Content-Length is intentionally discarded — re-marshaling
 // changes byte count.
-func writeNormalizedResponse(w http.ResponseWriter, resp *http.Response, body io.Reader) {
+func (s *Server) writeNormalizedResponse(w http.ResponseWriter, resp *http.Response, body io.Reader) {
 	out, err := io.ReadAll(body)
 	if err != nil {
-		// Headers haven't been written yet; surface as a server error.
-		// Caller ignores its writeError-equivalent at this point because
-		// the upstream call already succeeded; use a plain 502 to signal
-		// mid-pipeline failure without pretending it was a backend
-		// rejection.
-		http.Error(w, "Failed to read backend response", http.StatusBadGateway)
+		// Headers haven't been written yet — emit a proper OpenAI
+		// error envelope so clients always see a parseable error
+		// shape, never a plain-text http.Error body.
+		status := http.StatusBadGateway
+		if errors.Is(err, normalize.ErrResponseTooLarge) {
+			status = http.StatusBadGateway
+		}
+		s.writeError(w, status, "server_error", "Failed to read backend response: "+err.Error())
 		return
 	}
 	copyResponseHeaders(w, resp, false)
@@ -961,34 +963,32 @@ func (s *Server) writeError(w http.ResponseWriter, status int, errType, message 
 	})
 }
 
-// openAIErrorTypeForStatus maps an upstream HTTP status to the OpenAI
-// error-type string we surface. Mirror of anthropicErrorTypeForStatus
-// so both surfaces give clients consistent error categorization
-// regardless of which backend failed.
+// openAIErrorTypeForStatus maps an upstream HTTP status to the
+// short error-type string this proxy uses across all OpenAI error
+// responses (writeError call sites use "invalid_request",
+// "not_found", "server_error", "method_not_allowed", etc. — kept
+// for consistency over OpenAI's canonical "*_error" suffix forms).
+// A future canonicalization pass should align both this function
+// and the existing call sites in one go.
 func openAIErrorTypeForStatus(status int) string {
 	switch status {
-	case http.StatusBadRequest:
-		return "invalid_request_error"
+	case http.StatusBadRequest,
+		http.StatusRequestEntityTooLarge,
+		http.StatusUnprocessableEntity: // llama-server uses 422 for context overflow
+		return "invalid_request"
 	case http.StatusUnauthorized:
 		return "authentication_error"
 	case http.StatusForbidden:
 		return "permission_error"
 	case http.StatusNotFound:
-		return "not_found_error"
-	case http.StatusRequestEntityTooLarge:
-		return "invalid_request_error"
-	case http.StatusUnprocessableEntity:
-		// llama-server returns 422 for context-window overflow; the
-		// OpenAI SDK branches on status code independently of the
-		// error type, so keep it explicit.
-		return "invalid_request_error"
+		return "not_found"
 	case http.StatusTooManyRequests:
-		return "rate_limit_error"
-	case http.StatusServiceUnavailable:
-		return "server_error"
+		return "rate_limit"
+	case http.StatusMethodNotAllowed:
+		return "method_not_allowed"
 	default:
 		if status >= 400 && status < 500 {
-			return "invalid_request_error"
+			return "invalid_request"
 		}
 		return "server_error"
 	}
