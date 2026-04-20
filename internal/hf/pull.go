@@ -36,6 +36,8 @@ type ManifestInfo struct {
 
 // GetManifestInfo fetches the manifest and returns size information for display.
 // Returns the manifest data so it can be passed to PullModel to avoid re-fetching.
+// For split GGUFs, it also fetches the sizes of additional shards so the
+// reported GGUFSize reflects the full model, not just the first shard.
 func GetManifestInfo(client *Client, user, repo string, quant Quantization) (*ManifestInfo, *Manifest, []byte, error) {
 	manifest, manifestJSON, err := client.GetManifest(user, repo, quant.Tag)
 	if err != nil {
@@ -46,9 +48,26 @@ func GetManifestInfo(client *Client, user, repo string, quant Quantization) (*Ma
 		return nil, nil, nil, fmt.Errorf("manifest does not contain a GGUF file")
 	}
 
+	splitInfo := ParseSplitFilename(manifest.GGUFFile.RFilename)
+	if splitInfo != nil && splitInfo.SplitNo != 0 {
+		return nil, nil, nil, fmt.Errorf("manifest references split %d, expected first split", splitInfo.SplitNo+1)
+	}
+
+	ggufSize := manifest.GGUFFile.Size
+	if splitInfo != nil {
+		splitFiles, err := fetchSplitFileInfo(client, user, repo, splitInfo)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to fetch split file info: %w", err)
+		}
+		manifest.SplitFiles = splitFiles
+		for _, sf := range splitFiles {
+			ggufSize += sf.Size
+		}
+	}
+
 	info := &ManifestInfo{
-		GGUFSize:  manifest.GGUFFile.Size,
-		TotalSize: manifest.GGUFFile.Size,
+		GGUFSize:  ggufSize,
+		TotalSize: ggufSize,
 		IsVision:  manifest.MMProjFile != nil,
 	}
 	if info.IsVision {
@@ -87,8 +106,8 @@ func PullModel(client *Client, user, repo string, quant Quantization, opts *Pull
 		return nil, fmt.Errorf("manifest references split %d, expected first split", splitInfo.SplitNo+1)
 	}
 
-	// Fetch split file info if needed
-	if splitInfo != nil {
+	// Fetch split file info if needed (skip if already populated by GetManifestInfo).
+	if splitInfo != nil && manifest.SplitFiles == nil {
 		splitFiles, err := fetchSplitFileInfo(client, user, repo, splitInfo)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch split file info: %w", err)
