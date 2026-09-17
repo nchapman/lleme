@@ -121,16 +121,22 @@ type Manifest struct {
 	SplitFiles []*ManifestFile `json:"splitFiles,omitempty"` // Additional split files (local augmentation)
 }
 
-// hfAllowedHosts is the set of hosts the HuggingFace download client is
-// permitted to contact, including the LFS CDN that huggingface.co redirects
-// to for large files. Any other host on a redirect chain fails closed.
-var hfAllowedHosts = map[string]bool{
-	"huggingface.co":          true,
-	"hf.co":                   true,
-	"cdn-lfs.huggingface.co":  true,
-	"cdn-lfs.hf.co":           true,
-	"cas-bridge.xethub.hf.co": true,
-	"cas-server.xethub.hf.co": true,
+// hfAllowedDomains are the Hugging Face-owned apex domains the download
+// client is permitted to redirect to, covering the LFS and regional xet
+// CDN subdomains (cdn-lfs.*, cas-*.xethub.*, us.aws.cdn.*, …) that vary
+// by region and change over time. Any other host on a redirect chain
+// fails closed, so a compromised HF response cannot steer the
+// Authorization-bearing download off Hugging Face infrastructure.
+var hfAllowedDomains = []string{"hf.co", "huggingface.co"}
+
+func hfHostAllowed(host string) bool {
+	host = strings.ToLower(host)
+	for _, domain := range hfAllowedDomains {
+		if host == domain || strings.HasSuffix(host, "."+domain) {
+			return true
+		}
+	}
+	return false
 }
 
 func NewClient(cfg *config.Config) *Client {
@@ -146,7 +152,7 @@ func NewClient(cfg *config.Config) *Client {
 			// response could 302 the download to an arbitrary host and the
 			// Authorization header would follow.
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if !hfAllowedHosts[req.URL.Hostname()] {
+				if !hfHostAllowed(req.URL.Hostname()) {
 					return fmt.Errorf("redirect blocked: %s is not on the HuggingFace download allowlist", req.URL.Hostname())
 				}
 				if req.URL.Scheme != "https" {
