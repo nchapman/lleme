@@ -1,4 +1,4 @@
-.PHONY: build build-go build-web install test check clean release-%
+.PHONY: build build-go build-web install test lint check clean release-%
 
 # Build web UI (requires pnpm)
 build-web:
@@ -18,6 +18,10 @@ install:
 # Run tests
 test:
 	go test ./...
+
+# Lint (same config and version CI uses; see .github/workflows/ci.yaml)
+lint:
+	golangci-lint run
 
 # Format, vet, test, and lint
 check:
