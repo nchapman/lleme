@@ -10,7 +10,7 @@ import (
 )
 
 func TestBufferedNormalizesNonStreamResponse(t *testing.T) {
-	// Minimal SwiftLM-shaped non-streaming response: model is the
+	// Minimal non-streaming response: model is the
 	// backend's internal id, no system_fingerprint, usage missing
 	// details. All three should be patched.
 	in := `{"id":"chatcmpl-1","object":"chat.completion","model":"backend-id","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`

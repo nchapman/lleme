@@ -648,7 +648,8 @@ func TestGetLatestVersionRejectsBadTag(t *testing.T) {
 		{"path traversal in tag", "../../../etc/passwd", true},
 		{"shell metachar", "b8169; rm -rf /", true},
 		{"empty tag", "", true},
-		{"non-b prefix", "v1.0.0", true},
+		{"malformed semver", "v1.0", true},
+		{"non-b prefix", "x1.0.0", true},
 		{"embedded slash", "b8169/extra", true},
 		{"leading slash", "/b8169", true},
 		{"wrong case", "B8169", true},
@@ -668,6 +669,111 @@ func TestGetLatestVersionRejectsBadTag(t *testing.T) {
 				t.Errorf("Expected no error for tag %q, got %v", tt.tag, err)
 			}
 		})
+	}
+}
+
+func TestGetLatestVersionResolvesStableTag(t *testing.T) {
+	t.Run("resolves vX.Y.Z to the nightly release via nightly-tag.txt", func(t *testing.T) {
+		srv := mockStableReleaseServer(t, "v0.4.1", "b10964", "b10964\n")
+		defer srv.Close()
+		withAPIBase(t, srv.URL)
+		withDownloadHost(t, srv)
+
+		release, err := GetLatestVersion()
+		if err != nil {
+			t.Fatalf("Expected resolution to succeed, got %v", err)
+		}
+		if release.TagName != "b10964" {
+			t.Errorf("Expected resolved tag b10964, got %s", release.TagName)
+		}
+	})
+
+	t.Run("errors when stable release lacks nightly-tag.txt", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/releases/latest") {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"tag_name": "v0.4.1", "assets": []}`)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer srv.Close()
+		withAPIBase(t, srv.URL)
+
+		_, err := GetLatestVersion()
+		if err == nil || !strings.Contains(err.Error(), "nightly-tag.txt") {
+			t.Errorf("Expected missing nightly-tag.txt error, got %v", err)
+		}
+	})
+
+	t.Run("errors when nightly-tag.txt contents are not a b tag", func(t *testing.T) {
+		srv := mockStableReleaseServer(t, "v0.4.1", "b10964", "../../evil\n")
+		defer srv.Close()
+		withAPIBase(t, srv.URL)
+		withDownloadHost(t, srv)
+
+		_, err := GetLatestVersion()
+		if err == nil || !strings.Contains(err.Error(), "not a b<number> tag") {
+			t.Errorf("Expected invalid tag content error, got %v", err)
+		}
+	})
+
+	t.Run("errors when nightly-tag.txt is oversized", func(t *testing.T) {
+		srv := mockStableReleaseServer(t, "v0.4.1", "b10964", strings.Repeat("A", 2048))
+		defer srv.Close()
+		withAPIBase(t, srv.URL)
+		withDownloadHost(t, srv)
+
+		_, err := GetLatestVersion()
+		if err == nil || !strings.Contains(err.Error(), "exceeds") {
+			t.Errorf("Expected oversize rejection, got %v", err)
+		}
+	})
+
+	t.Run("errors when the nightly release lookup fails", func(t *testing.T) {
+		srv := mockStableReleaseServer(t, "v0.4.1", "b10964", "b10964\n")
+		// Override the tags endpoint to 404 by pointing apiBase at a server
+		// that only serves /releases/latest and the asset.
+		apiOnly := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/releases/latest") {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"tag_name": "v0.4.1", "assets": [{"name": "nightly-tag.txt", "browser_download_url": "`+srv.URL+`/nightly-tag.txt"}]}`)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer apiOnly.Close()
+		defer srv.Close()
+		withAPIBase(t, apiOnly.URL)
+		withDownloadHost(t, srv)
+
+		_, err := GetLatestVersion()
+		if err == nil {
+			t.Error("Expected error when nightly release lookup fails")
+		}
+	})
+}
+
+func TestFetchNightlyTagBlocksDisallowedRedirect(t *testing.T) {
+	// Allow-listed entry server 302s the nightly-tag.txt request to an
+	// off-allowlist host; the CheckRedirect callback must reject it.
+	const attackerURL = "https://attacker.example.com/evil.txt"
+	entry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, attackerURL, http.StatusFound)
+	}))
+	defer entry.Close()
+	withDownloadHost(t, entry)
+
+	stable := &Release{
+		TagName: "v0.4.1",
+		Assets:  []Asset{{Name: "nightly-tag.txt", BrowserDownloadUrl: entry.URL + "/nightly-tag.txt"}},
+	}
+	_, err := fetchNightlyTag(stable)
+	if err == nil {
+		t.Fatal("Expected redirect to attacker host to be blocked")
+	}
+	if !strings.Contains(err.Error(), "redirect blocked") {
+		t.Errorf("Expected redirect blocked error, got %v", err)
 	}
 }
 
@@ -1044,6 +1150,39 @@ func mockGitHubLatest(t *testing.T, tagName string) *httptest.Server {
 		body := fmt.Sprintf(`{"tag_name": %q, "name": "release", "assets": []}`, tagName)
 		_, _ = io.WriteString(w, body)
 	}))
+}
+
+// mockStableReleaseServer simulates llama.cpp's stable-release layout: a
+// vX.Y.Z release whose only asset is nightly-tag.txt, plus the b<number>
+// release it points at.
+func mockStableReleaseServer(t *testing.T, stableTag, nightlyTag, nightlyTagContent string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/releases/latest"):
+			w.Header().Set("Content-Type", "application/json")
+			body := fmt.Sprintf(`{"tag_name": %q, "name": %q, "assets": [{"name": "nightly-tag.txt", "browser_download_url": "%s/nightly-tag.txt"}]}`, stableTag, stableTag, ownURL(r))
+			_, _ = io.WriteString(w, body)
+		case strings.HasSuffix(r.URL.Path, "/nightly-tag.txt"):
+			_, _ = io.WriteString(w, nightlyTagContent)
+		case strings.HasSuffix(r.URL.Path, "/releases/tags/"+nightlyTag):
+			w.Header().Set("Content-Type", "application/json")
+			body := fmt.Sprintf(`{"tag_name": %q, "name": %q, "assets": []}`, nightlyTag, nightlyTag)
+			_, _ = io.WriteString(w, body)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+// ownURL reconstructs the request URL as seen from the client so asset URLs
+// point back at this server regardless of the host header Go derives.
+func ownURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
 }
 
 func writeInstalledVersion(t *testing.T, tag string) {

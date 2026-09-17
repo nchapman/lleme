@@ -3,7 +3,6 @@ package ui
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/nchapman/lleme/internal/styles"
@@ -63,28 +62,13 @@ func LlamaCppCredit(version string) string {
 	return Muted(fmt.Sprintf("Powered by llama.cpp %s", version))
 }
 
-// SwiftLMCredit returns the SwiftLM attribution line.
-func SwiftLMCredit(version string) string {
-	return Muted(fmt.Sprintf("Powered by SwiftLM %s", version))
-}
-
-// BackendsCredit returns a combined attribution line for whichever backends
-// are installed. Empty version strings are omitted so we never show a
-// "Powered by llama.cpp " with no tag on hosts where the backend isn't
-// present. Separator is a middle dot for visual parity with the rest of
-// the status lines.
-func BackendsCredit(llamaVersion, swiftLMVersion string) string {
-	var parts []string
-	if llamaVersion != "" {
-		parts = append(parts, fmt.Sprintf("llama.cpp %s", llamaVersion))
-	}
-	if swiftLMVersion != "" {
-		parts = append(parts, fmt.Sprintf("SwiftLM %s", swiftLMVersion))
-	}
-	if len(parts) == 0 {
+// BackendsCredit returns the attribution line for the installed llama.cpp
+// version. Empty when the backend isn't installed.
+func BackendsCredit(llamaVersion string) string {
+	if llamaVersion == "" {
 		return ""
 	}
-	return Muted("Powered by " + strings.Join(parts, " • "))
+	return Muted("Powered by llama.cpp " + llamaVersion)
 }
 
 // Fatal prints an error message to stderr and exits with code 1.

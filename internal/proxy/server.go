@@ -24,7 +24,6 @@ import (
 	"github.com/nchapman/lleme/internal/llama"
 	"github.com/nchapman/lleme/internal/logs"
 	"github.com/nchapman/lleme/internal/proxy/normalize"
-	"github.com/nchapman/lleme/internal/swiftlm"
 	"github.com/nchapman/lleme/internal/version"
 )
 
@@ -122,114 +121,38 @@ func (s *Server) Start() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.autoUpdateCancel = cancel
 	go s.autoUpdateLlamaCpp(ctx)
-	go s.autoUpdateSwiftLM(ctx)
 
 	return nil
 }
 
-// autoUpdateCheck bundles what one backend's NewerVersionAvailable +
-// identifiers resolve to before runBackendAutoUpdate drives the flow.
-type autoUpdateCheck struct {
-	name         string
-	enabled      bool
-	installedTag string
-	latestTag    string
-	haveLatest   bool
-	checkErr     error
-	install      func(context.Context) (string, error) // returns newly-installed tag
-}
-
-// runBackendAutoUpdate drives the check → install → log flow for one
-// backend. Failures never affect the proxy; the context is canceled on Stop
-// so an in-flight download aborts rather than swapping a symlink after
-// shutdown. Kept separate from the two per-backend constructors so the
-// shared logic isn't flagged as a duplicate.
-func runBackendAutoUpdate(ctx context.Context, c autoUpdateCheck) {
-	if !c.enabled {
-		return
-	}
-	if c.checkErr != nil {
-		logs.Debug(c.name+" auto-update check failed", "error", c.checkErr)
-		return
-	}
-	if !c.haveLatest {
-		return
-	}
-	logs.Info("Auto-updating "+c.name+" in background", "from", c.installedTag, "to", c.latestTag)
-
-	newTag, err := c.install(ctx)
-	if err != nil {
-		if ctx.Err() != nil {
-			logs.Debug(c.name+" auto-update canceled on shutdown", "error", err)
-			return
-		}
-		logs.Warn(c.name+" auto-update failed", "error", err)
-		return
-	}
-	logs.Info(c.name+" auto-update installed; new model loads will use this version", "version", newTag)
-}
-
-// autoUpdateLlamaCpp runs the llama.cpp auto-update check + install. The
-// structural twin autoUpdateSwiftLM below duplicates the glue deliberately
-// — collapsing both into a generic helper would lose per-backend types at
-// package boundaries; the shared flow lives in runBackendAutoUpdate.
-//
-//nolint:dupl // backend-identity repetition; see doc comment above.
+// autoUpdateLlamaCpp runs the llama.cpp auto-update check + install.
+// Failures never affect the proxy; the context is canceled on Stop so an
+// in-flight download aborts rather than swapping a symlink after shutdown.
 func (s *Server) autoUpdateLlamaCpp(ctx context.Context) {
 	latest, installed, err := llama.NewerVersionAvailable()
-	installedTag, latestTag := "", ""
+	if err != nil {
+		logs.Debug("llama.cpp auto-update check failed", "error", err)
+		return
+	}
+	if s.appConfig == nil || !s.appConfig.LlamaCpp.AutoUpdateEnabled() || latest == nil {
+		return
+	}
+	installedTag := ""
 	if installed != nil {
 		installedTag = installed.TagName
 	}
-	if latest != nil {
-		latestTag = latest.TagName
-	}
-	runBackendAutoUpdate(ctx, autoUpdateCheck{
-		name:         "llama.cpp",
-		enabled:      s.appConfig != nil && s.appConfig.LlamaCpp.AutoUpdateEnabled(),
-		installedTag: installedTag,
-		latestTag:    latestTag,
-		haveLatest:   latest != nil,
-		checkErr:     err,
-		install: func(ctx context.Context) (string, error) {
-			info, err := llama.InstallReleaseForAutoUpdate(ctx, latest, nil)
-			if err != nil {
-				return "", err
-			}
-			return info.TagName, nil
-		},
-	})
-}
+	logs.Info("Auto-updating llama.cpp in background", "from", installedTag, "to", latest.TagName)
 
-// autoUpdateSwiftLM runs the SwiftLM auto-update check + install. Gated on
-// the platform via swiftlm.NewerVersionAvailable returning nil on hosts
-// SwiftLM doesn't support. See autoUpdateLlamaCpp for the design note.
-//
-//nolint:dupl // backend-identity repetition; see autoUpdateLlamaCpp.
-func (s *Server) autoUpdateSwiftLM(ctx context.Context) {
-	latest, installed, err := swiftlm.NewerVersionAvailable()
-	installedTag, latestTag := "", ""
-	if installed != nil {
-		installedTag = installed.TagName
+	info, err := llama.InstallReleaseForAutoUpdate(ctx, latest, nil)
+	if err != nil {
+		if ctx.Err() != nil {
+			logs.Debug("llama.cpp auto-update canceled on shutdown", "error", err)
+			return
+		}
+		logs.Warn("llama.cpp auto-update failed", "error", err)
+		return
 	}
-	if latest != nil {
-		latestTag = latest.TagName
-	}
-	runBackendAutoUpdate(ctx, autoUpdateCheck{
-		name:         "SwiftLM",
-		enabled:      s.appConfig != nil && s.appConfig.SwiftLM.AutoUpdateEnabled(),
-		installedTag: installedTag,
-		latestTag:    latestTag,
-		haveLatest:   latest != nil,
-		checkErr:     err,
-		install: func(ctx context.Context) (string, error) {
-			info, err := swiftlm.InstallReleaseForAutoUpdate(ctx, latest, nil)
-			if err != nil {
-				return "", err
-			}
-			return info.TagName, nil
-		},
-	})
+	logs.Info("llama.cpp auto-update installed; new model loads will use this version", "version", info.TagName)
 }
 
 // Stop gracefully stops the proxy server
@@ -464,8 +387,8 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 
 // handleAnthropicMessages translates an Anthropic /v1/messages request into
 // an OpenAI chat completion, forwards it to the selected backend, and
-// translates the response back. Translation happens in the proxy so backends
-// (llama-server, SwiftLM) only need to speak OpenAI.
+// translates the response back. Translation happens in the proxy so the
+// backend only needs to speak OpenAI.
 func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	requestID := generateRequestID()
 
@@ -513,11 +436,9 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Pass the upstream body through the normalize layer before the
-	// Anthropic translator sees it. SwiftLM's prefill_progress frames
-	// would otherwise reach handleStreamLine as malformed-but-parseable
-	// JSON and emit phantom Anthropic events; the model rewrite and
-	// envelope synthesis are no-ops on the Anthropic surface but keep
-	// both code paths consuming an identical OpenAI shape.
+	// Anthropic translator sees it. The model rewrite and envelope
+	// synthesis are no-ops on the Anthropic surface but keep both code
+	// paths consuming an identical OpenAI shape.
 	wrapped := normalize.Wrap(resp.Body, normalize.Options{
 		RequestedModel: modelName,
 		Streaming:      stream,

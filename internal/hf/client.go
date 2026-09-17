@@ -270,7 +270,7 @@ func (c *Client) ListFilesInPath(user, repo, branch, path string) ([]FileTree, e
 }
 
 // SearchModels queries HuggingFace's models-json endpoint. apps filters to
-// compatible runtimes (e.g. "llama.cpp", "mlx-lm"); callers typically join
+// compatible runtimes (e.g. "llama.cpp"); callers typically join
 // the names of all registered backends. An empty apps is allowed but
 // unfiltered results are noisy, so callers should pass something.
 func (c *Client) SearchModels(query string, limit int, apps []string) ([]SearchResult, error) {

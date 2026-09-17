@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/nchapman/lleme/internal/config"
-	"github.com/nchapman/lleme/internal/hf"
 	"github.com/nchapman/lleme/internal/options"
 	"github.com/nchapman/lleme/internal/presets"
 	"github.com/nchapman/lleme/internal/server"
@@ -39,7 +38,7 @@ func NewChatSession(api *server.APIClient, model string, cfg *config.Config, per
 		api:      api,
 		model:    model,
 		persona:  persona,
-		resolver: options.NewResolver(persona, cfg, preset).WithBackendKind(hf.BackendKindForModelName(model)),
+		resolver: options.NewResolver(persona, cfg, preset),
 		messages: []server.ChatMessage{},
 	}
 }

@@ -1,16 +1,16 @@
-// Package normalize patches subtle divergences in backend OpenAI surfaces
-// (llama-server, SwiftLM) into a single canonical shape before responses
-// reach OpenAI clients or the in-proxy Anthropic translator.
+// Package normalize patches subtle divergences in llama-server's OpenAI
+// surface into a canonical shape before responses reach OpenAI clients
+// or the in-proxy Anthropic translator.
 //
-// Design rules — all four normalizers obey these:
+// Design rules — all normalizers obey these:
 //
 //   - Idempotent: running a second pass on already-normalized output is a
 //     no-op. Tests assert this directly so we don't drift.
-//   - Self-disabling: when a backend stops emitting the bad pattern (e.g.
-//     SwiftLM lands its prefill_progress filtering, or starts populating
-//     system_fingerprint), the normalizer sees the new shape, finds no
-//     work to do, and passes the bytes through. We never have to remove
-//     a normalizer just because upstream caught up.
+//   - Self-disabling: when the backend stops emitting the bad pattern
+//     (e.g. starts populating system_fingerprint), the normalizer sees
+//     the new shape, finds no work to do, and passes the bytes through.
+//     We never have to remove a normalizer just because upstream caught
+//     up.
 //   - Additive only: never overwrite a field the backend provided. The
 //     single exception is `model`, which we always rewrite to the name
 //     the client requested — that's the contract callers depend on.
@@ -25,9 +25,9 @@ import (
 )
 
 // Options configures a Wrap. RequestedModel is the model name from the
-// client's request — we rewrite responses to echo it back, since SwiftLM
-// substitutes its own internal modelId. Streaming switches between the
-// SSE-aware reader and the buffered JSON reader.
+// client's request — responses are rewritten to echo it back so the
+// model field always matches what the client asked for. Streaming
+// switches between the SSE-aware reader and the buffered JSON reader.
 type Options struct {
 	RequestedModel string
 	Streaming      bool

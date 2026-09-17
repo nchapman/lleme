@@ -3,14 +3,14 @@ package proxy
 // Translation between the Anthropic Messages API (/v1/messages) and the
 // OpenAI Chat Completions API (/v1/chat/completions). Anthropic translation
 // happens here so backends only need to speak OpenAI; this lets llama-server
-// and SwiftLM (which has no Anthropic endpoint) present a consistent surface.
+// present a consistent surface without its own Anthropic endpoint.
 //
 // Scope:
 //   - Text content: full support (string or array of {type:"text", text:...}).
 //   - Image content: base64 with Anthropic's accepted media_type set. URL
-//     sources are rejected with a clear 400 because neither llama-server nor
-//     SwiftLM fetch URLs at request time; forwarding one would surface as an
-//     opaque backend error.
+//     sources are rejected with a clear 400 because llama-server doesn't
+//     fetch URLs at request time; forwarding one would surface as an opaque
+//     backend error.
 //   - Tool calling: full round-trip. Request-level tools translate to OpenAI
 //     function tools; tool_choice {auto|any|tool|none} maps to OpenAI's
 //     {auto|required|function:{name}|none}; assistant tool_use blocks become
@@ -21,12 +21,12 @@ package proxy
 //     own Anthropic content_block index; function.arguments fragments become
 //     input_json_delta partial_json events that SDK accumulators reassemble.
 //   - Reasoning / extended-thinking: output-side passthrough. Backend
-//     reasoning_content (llama-server --reasoning-format deepseek; SwiftLM
-//     --thinking) translates to Anthropic thinking content blocks in both
-//     streaming (thinking_delta events) and non-streaming paths. Request-
-//     level `thinking: {type:"enabled", budget_tokens:N}` forwards as
-//     top-level `thinking_budget_tokens` (honored by llama-server, ignored
-//     by SwiftLM). Input-side thinking blocks in prior assistant messages
+//     reasoning_content (llama-server --reasoning-format deepseek)
+//     translates to Anthropic thinking content blocks in both streaming
+//     (thinking_delta events) and non-streaming paths. Request-level
+//     `thinking: {type:"enabled", budget_tokens:N}` forwards as top-level
+//     `thinking_budget_tokens` (honored by llama-server). Input-side
+//     thinking blocks in prior assistant messages
 //     are concatenated into `reasoning_content` on the OpenAI message —
 //     matches llama.cpp's own /v1/messages translator so reasoning-aware
 //     chat templates render prior chain-of-thought for multi-turn extended-
@@ -203,10 +203,10 @@ type openAIMessage struct {
 	Content    json.RawMessage  `json:"content,omitempty"` // string or multimodal array; may be absent for assistant tool_calls
 	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"` // set when Role == "tool"
-	// ReasoningContent is the DeepSeek-convention field both llama-server
-	// (--reasoning-format deepseek, default) and SwiftLM (--thinking) emit
-	// on non-streaming assistant responses. Output-only: we don't forward
-	// it back as input because neither backend accepts it there.
+	// ReasoningContent is the DeepSeek-convention field llama-server
+	// (--reasoning-format deepseek, default) emits on non-streaming
+	// assistant responses. Output-only: we don't forward it back as input
+	// because the backend doesn't accept it there.
 	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
@@ -547,8 +547,8 @@ func translateAnthropicToolChoice(raw json.RawMessage) (json.RawMessage, error) 
 //
 // Mirrors llama.cpp's own /v1/messages handling: `thinking.budget_tokens` is
 // forwarded as top-level `thinking_budget_tokens` on the chat-completions
-// payload. llama-server honors it via the reasoning sampler; SwiftLM
-// tolerates unknown fields. Malformed / disabled / absent → ok=false (silent
+// payload. llama-server honors it via the reasoning sampler. Malformed /
+// disabled / absent → ok=false (silent
 // forward-compat, consistent with how other unknown top-level fields are
 // tolerated by this proxy).
 func parseAnthropicThinking(raw json.RawMessage) (int, bool) {
@@ -653,8 +653,7 @@ func translateAssistantBlocks(blocks []anthropicContentBlock) ([]openAIMessage, 
 			// → chat-completions translation (server-common.cpp:1577). The
 			// chat template renders it via the reasoning slot (Qwen3,
 			// DeepSeek-R1, GLM-4.5) so the model sees its own prior chain of
-			// thought on multi-turn extended-thinking conversations. SwiftLM
-			// ignores unknown message fields, so this is safe there too.
+			// thought on multi-turn extended-thinking conversations.
 			reasoningParts = append(reasoningParts, b.Thinking)
 		case "redacted_thinking":
 			// Drop entirely — encrypted Anthropic-server-only state with no
@@ -723,9 +722,8 @@ func translateUserBlocks(blocks []anthropicContentBlock) ([]openAIMessage, error
 
 // translateImageBlock converts an Anthropic image block to OpenAI's
 // image_url content part. URL sources are refused with a clear 400 because
-// llama-server and SwiftLM don't fetch remote URLs — forwarding would
-// produce an opaque backend error. Base64 sources are reformatted into a
-// data URL.
+// llama-server doesn't fetch remote URLs — forwarding would produce an
+// opaque backend error. Base64 sources are reformatted into a data URL.
 func translateImageBlock(b anthropicContentBlock) (openAIContentPart, error) {
 	if b.Source == nil {
 		return openAIContentPart{}, fmt.Errorf("image: missing source")
@@ -1222,7 +1220,7 @@ func (s *streamState) applyChunk(chunk *openAIStreamChunk) error {
 		s.completionTokens = chunk.Usage.CompletionTokens
 	}
 	for _, c := range chunk.Choices {
-		// Reasoning first: llama-server and SwiftLM emit reasoning_content
+		// Reasoning first: llama-server emits reasoning_content
 		// before content, so this ordering also keeps the allocated
 		// content_block indices stable (thinking=0, text=1 on a typical
 		// reasoning turn) to match the non-streaming response shape.
@@ -1451,8 +1449,8 @@ func handleStreamLine(state *streamState, line []byte) (bool, error) {
 
 // countAnthropicTokens returns an approximate token count for an Anthropic
 // /v1/messages/count_tokens request body. Anthropic requires this endpoint
-// but llama-server and SwiftLM don't expose an OpenAI-equivalent that works
-// without loading the model, so we approximate.
+// but llama-server doesn't expose an OpenAI-equivalent that works without
+// loading the model, so we approximate.
 //
 // The estimate is deliberately pessimistic:
 //   - ~2.5 chars/token covers the common adversarial cases (whitespace-

@@ -30,7 +30,7 @@ func TestSelectRuntime(t *testing.T) {
 	}{
 		{"legacy empty defaults to gguf", "q_legacy", "", "", BackendKindLlama},
 		{"gguf returns llama runtime", "q_gguf", hf.BackendGGUF, "", BackendKindLlama},
-		{"mlx returns swiftlm runtime", "q_mlx", hf.BackendMLX, "", BackendKindMLX},
+		{"mlx errors with removal guidance", "q_mlx", hf.BackendMLX, "MLX models are no longer supported", ""},
 		{"unknown kind errors", "q_bogus", "bogus", "unrecognized backend kind", ""},
 	}
 

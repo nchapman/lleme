@@ -17,26 +17,6 @@ func runStream(t *testing.T, in string, opts Options) string {
 	return string(out)
 }
 
-func TestStreamDropsPrefillProgress(t *testing.T) {
-	in := strings.Join([]string{
-		`data: {"object":"prefill_progress","fraction":0.25}`, "",
-		`data: {"object":"prefill_progress","fraction":0.75}`, "",
-		`data: {"object":"chat.completion.chunk","id":"abc","model":"backend","choices":[{"delta":{"content":"hi"}}]}`, "",
-		`data: [DONE]`, "",
-		"",
-	}, "\n")
-	got := runStream(t, in, Options{RequestedModel: "user/repo", Fingerprint: "lleme-test"})
-	if strings.Contains(got, "prefill_progress") {
-		t.Errorf("prefill_progress leaked into output:\n%s", got)
-	}
-	if !strings.Contains(got, `"chat.completion.chunk"`) {
-		t.Errorf("real chunk dropped:\n%s", got)
-	}
-	if !strings.Contains(got, "[DONE]") {
-		t.Errorf("[DONE] terminator dropped:\n%s", got)
-	}
-}
-
 func TestStreamRewritesModel(t *testing.T) {
 	in := "data: {\"object\":\"chat.completion.chunk\",\"model\":\"backend-id\"}\n\n"
 	got := runStream(t, in, Options{RequestedModel: "user/repo", Fingerprint: "lleme-test"})
@@ -105,7 +85,7 @@ func TestStreamPassesMalformedJSON(t *testing.T) {
 }
 
 func TestStreamSynthesizesFingerprintAndUsageDetails(t *testing.T) {
-	// SwiftLM-shaped final chunk: no system_fingerprint, usage missing details.
+	// Minimal final chunk: no system_fingerprint, usage missing details.
 	in := "data: {\"object\":\"chat.completion.chunk\",\"model\":\"backend\",\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"total_tokens\":10}}\n\n"
 	got := runStream(t, in, Options{RequestedModel: "user/repo", Fingerprint: "lleme-vX"})
 	if !strings.Contains(got, `"system_fingerprint":"lleme-vX"`) {

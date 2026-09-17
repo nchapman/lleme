@@ -85,6 +85,16 @@ var maxDownloadBytes int64 = 1 << 30
 // llama-current symlink target.
 var tagNameRe = regexp.MustCompile(`^b\d+$`)
 
+// semverTagRe matches llama.cpp stable release tags (e.g. "v0.4.1"). Stable
+// releases carry no binary assets; their nightly-tag.txt asset names the
+// b<number> prerelease that does.
+var semverTagRe = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
+
+// maxNightlyTagBytes caps how much of nightly-tag.txt we'll read. The file
+// holds a single b<number> tag (~8 bytes); anything larger is a corrupted or
+// hostile response and is rejected outright.
+const maxNightlyTagBytes int64 = 1024
+
 // allowedDownloadHosts are the hosts from which llama.cpp release assets may
 // be fetched. github.com issues 302 redirects to *.githubusercontent.com.
 var allowedDownloadHosts = map[string]bool{
@@ -163,9 +173,25 @@ func getBinaryPattern(release *Release) string {
 }
 
 func GetLatestVersion() (*Release, error) {
-	url := apiBase + "/releases/latest"
+	release, err := fetchRelease("/releases/latest")
+	if err != nil {
+		return nil, err
+	}
 
-	req, err := http.NewRequest("GET", url, nil)
+	switch {
+	case tagNameRe.MatchString(release.TagName):
+		return release, nil
+	case semverTagRe.MatchString(release.TagName):
+		return resolveStableRelease(release)
+	default:
+		return nil, fmt.Errorf("unexpected tag_name %q in release response (expected b<number> or vX.Y.Z)", release.TagName)
+	}
+}
+
+// fetchRelease retrieves a release from the GitHub API at the given path
+// (e.g. "/releases/latest" or "/releases/tags/b8169").
+func fetchRelease(path string) (*Release, error) {
+	req, err := http.NewRequest("GET", apiBase+path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -190,11 +216,85 @@ func GetLatestVersion() (*Release, error) {
 		return nil, err
 	}
 
+	return &release, nil
+}
+
+// resolveStableRelease maps a stable vX.Y.Z release to the b<number> release
+// that carries its binaries. llama.cpp stable releases ship only a
+// nightly-tag.txt asset whose contents name the matching b<number> tag.
+func resolveStableRelease(stable *Release) (*Release, error) {
+	tag, err := fetchNightlyTag(stable)
+	if err != nil {
+		return nil, fmt.Errorf("resolve stable release %s: %w", stable.TagName, err)
+	}
+	release, err := fetchRelease("/releases/tags/" + tag)
+	if err != nil {
+		return nil, fmt.Errorf("fetch release %s: %w", tag, err)
+	}
 	if !tagNameRe.MatchString(release.TagName) {
-		return nil, fmt.Errorf("unexpected tag_name %q in release response (expected b<number>)", release.TagName)
+		return nil, fmt.Errorf("unexpected tag_name %q for release %s (expected b<number>)", release.TagName, tag)
+	}
+	return release, nil
+}
+
+func fetchNightlyTag(stable *Release) (string, error) {
+	var assetURL string
+	for _, asset := range stable.Assets {
+		if asset.Name == "nightly-tag.txt" {
+			assetURL = asset.BrowserDownloadUrl
+			break
+		}
+	}
+	if assetURL == "" {
+		return "", fmt.Errorf("release has no nightly-tag.txt asset")
 	}
 
-	return &release, nil
+	if err := validateDownloadURL(assetURL); err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequest("GET", assetURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", version.UserAgent())
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if err := validateDownloadURL(req.URL.String()); err != nil {
+				return fmt.Errorf("redirect blocked: %w", err)
+			}
+			if len(via) >= 10 {
+				return fmt.Errorf("too many redirects")
+			}
+			return nil
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return "", fmt.Errorf("HTTP %d fetching nightly-tag.txt: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxNightlyTagBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read nightly-tag.txt: %w", err)
+	}
+	if int64(len(body)) > maxNightlyTagBytes {
+		return "", fmt.Errorf("nightly-tag.txt exceeds %d bytes", maxNightlyTagBytes)
+	}
+
+	tag := strings.TrimSpace(string(body))
+	if !tagNameRe.MatchString(tag) {
+		return "", fmt.Errorf("nightly-tag.txt contents %q are not a b<number> tag", tag)
+	}
+	return tag, nil
 }
 
 // validateDownloadURL rejects download URLs that don't use HTTPS and point to

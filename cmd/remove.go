@@ -176,7 +176,7 @@ func findModels(pattern string, olderThan time.Duration, largerThan int64) ([]Mo
 
 // findModelsInDir is the testable sibling of findModels. It sources the
 // raw inventory from hf.ListLocalModelsInDir (which knows about both GGUF
-// and MLX layouts) and then applies the user-supplied glob + age/size
+// and legacy MLX layouts) and then applies the user-supplied glob + age/size
 // filters on top.
 func findModelsInDir(modelsDir, pattern string, olderThan time.Duration, largerThan int64) ([]ModelInfo, error) {
 	re, err := regexp.Compile("^" + globToRegex(pattern) + "$")

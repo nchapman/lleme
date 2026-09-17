@@ -41,9 +41,9 @@ func newStreamReader(r io.Reader, opts Options) *streamReader {
 }
 
 // Read pulls and processes frames lazily. Each call may produce zero
-// frames (a dropped prefill_progress yields only the upstream advance,
-// no output bytes), so we loop until either the output buffer has
-// data, the upstream signals done, or we hit a fatal error.
+// frames (an event-only frame writes nothing to the output buffer), so
+// we loop until either the output buffer has data, the upstream
+// signals done, or we hit a fatal error.
 func (s *streamReader) Read(p []byte) (int, error) {
 	for s.out.Len() == 0 && !s.done {
 		if err := s.pumpFrame(); err != nil {
@@ -87,10 +87,10 @@ const (
 // io.EOF when upstream is fully drained.
 //
 // SSE line terminators per WHATWG §9.2.6 are CR, LF, or CRLF. We
-// only split on LF: both backends in scope (llama.cpp llama-server,
-// SwiftLM) emit LF/CRLF — a bare-CR-only stream would be read as one
-// giant line and tripped by the per-line cap. Document this here so
-// a future contributor knows the spec gap is deliberate, not missed.
+// only split on LF: llama-server emits LF/CRLF — a bare-CR-only
+// stream would be read as one giant line and tripped by the per-line
+// cap. Document this here so a future contributor knows the spec gap
+// is deliberate, not missed.
 //
 // An SSE frame is a sequence of non-empty lines terminated by a blank
 // line. We capture each line verbatim (including its line ending) so
@@ -182,12 +182,7 @@ func (s *streamReader) emitFrame(lines [][]byte) error {
 		return nil
 	}
 
-	if !applyChunkNormalizers(obj, s.opts) {
-		// Frame dropped (prefill_progress). Emit nothing — and don't
-		// advance the timing clock either, since dropped frames
-		// represent backend work the user can't see.
-		return nil
-	}
+	applyChunkNormalizers(obj, s.opts)
 
 	// Stateful timings synthesis runs after the stateless passes:
 	// markFirstContent anchors the clock to the first visible
@@ -215,8 +210,8 @@ func (s *streamReader) emitFrame(lines [][]byte) error {
 // and its payload bytes (with the data: prefix and trailing newline
 // stripped). Returns -1 if no data: line exists.
 //
-// Both backends (llama-server, SwiftLM) emit exactly one data: line
-// per frame for chat completions. SSE itself permits multiple data:
+// llama-server emits exactly one data: line per frame for chat
+// completions. SSE itself permits multiple data:
 // lines per frame, in which case spec-compliant clients concatenate
 // them with `\n` before parsing. We do *not* support that case: only
 // the last line is rewritten, earlier data: lines pass through

@@ -13,11 +13,10 @@ import (
 // **Always overwrites** any backend-supplied predicted_n /
 // predicted_ms / predicted_per_second. This is the second
 // always-overwrite exception in normalize (alongside `model`), and
-// the contract is deliberate: users compare backend speeds across
-// llama.cpp and SwiftLM, and llama-server's internal decode timer
-// measures something subtly different from SwiftLM's (which doesn't
-// emit timings at all). A single proxy-side measurement on both
-// sides yields apples-to-apples numbers.
+// the contract is deliberate: llama-server's internal decode timer
+// measures something subtly different from a wall-clock span, and a
+// single proxy-side measurement yields consistent numbers regardless
+// of backend quirks.
 //
 // Other timings fields the backend supplies (prompt_n, prompt_ms,
 // cache_n, etc.) are preserved — we can't measure prompt processing

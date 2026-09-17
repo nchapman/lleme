@@ -6,7 +6,6 @@ import (
 	"github.com/nchapman/lleme/internal/llama"
 	"github.com/nchapman/lleme/internal/proxy"
 	"github.com/nchapman/lleme/internal/selfupdate"
-	"github.com/nchapman/lleme/internal/swiftlm"
 	"github.com/nchapman/lleme/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -24,12 +23,6 @@ var updateLlamaCmd = &cobra.Command{
 	Run:   runUpdateLlama,
 }
 
-var updateSwiftLMCmd = &cobra.Command{
-	Use:   "swiftlm",
-	Short: "Update SwiftLM to the latest version (macOS Apple Silicon only)",
-	Run:   runUpdateSwiftLM,
-}
-
 var updateSelfCmd = &cobra.Command{
 	Use:   "self",
 	Short: "Update lleme to the latest version",
@@ -43,7 +36,6 @@ func init() {
 
 	rootCmd.AddCommand(updateCmd)
 	updateCmd.AddCommand(updateLlamaCmd)
-	updateCmd.AddCommand(updateSwiftLMCmd)
 	updateCmd.AddCommand(updateSelfCmd)
 }
 
@@ -85,7 +77,7 @@ func runUpdateAll(cmd *cobra.Command, args []string) {
 }
 
 // updateCheck bundles everything runUpdateAll needs about one component
-// (lleme / llama.cpp / SwiftLM) in a single shape, so the main flow stays
+// (lleme / llama.cpp) in a single shape, so the main flow stays simple.
 // declarative and doesn't branch per component.
 type updateCheck struct {
 	name         string
@@ -94,7 +86,7 @@ type updateCheck struct {
 	fetchErr     error
 	readErr      error // surfaced after status rendering
 	needsUpdate  bool
-	skipStatus   bool   // SwiftLM on unsupported platforms
+
 	readErrLabel string // what to say when readErr != nil
 	apply        func()
 }
@@ -103,15 +95,11 @@ func collectUpdateChecks() []updateCheck {
 	return []updateCheck{
 		checkLlemeUpdate(),
 		checkLlamaCppUpdate(),
-		checkSwiftLMUpdate(),
 	}
 }
 
 func renderUpdateChecks(checks []updateCheck) {
 	for _, c := range checks {
-		if c.skipStatus {
-			continue
-		}
 		printComponentStatus(c.name, c.installedStr, c.latestStr, c.fetchErr, c.needsUpdate)
 	}
 	for _, c := range checks {
@@ -155,33 +143,6 @@ func checkLlamaCppUpdate() updateCheck {
 		readErrLabel: "Failed to check llama.cpp installed version",
 		needsUpdate:  llamaUpdateAvailable(installed, release, fetchErr),
 		apply:        updateLlamaCpp,
-	}
-}
-
-func checkSwiftLMUpdate() updateCheck {
-	if !swiftlm.IsSupported() {
-		return updateCheck{name: "SwiftLM", skipStatus: true}
-	}
-	installed, readErr := swiftlm.GetInstalledVersion()
-	release, fetchErr := swiftlm.GetLatestVersion()
-	installedStr := "Not installed"
-	if installed != nil {
-		installedStr = installed.TagName
-	}
-	latestStr := "Unknown"
-	if release != nil {
-		latestStr = release.TagName
-	}
-	needs := fetchErr == nil && release != nil && (installed == nil || installed.TagName != release.TagName)
-	return updateCheck{
-		name:         "SwiftLM",
-		installedStr: installedStr,
-		latestStr:    latestStr,
-		fetchErr:     fetchErr,
-		readErr:      readErr,
-		readErrLabel: "Failed to check SwiftLM installed version",
-		needsUpdate:  needs,
-		apply:        updateSwiftLM,
 	}
 }
 
@@ -245,49 +206,6 @@ func runUpdateLlama(cmd *cobra.Command, args []string) {
 	restartServerIfRunning()
 }
 
-func runUpdateSwiftLM(cmd *cobra.Command, args []string) {
-	if !swiftlm.IsSupported() {
-		ui.Fatal("SwiftLM (MLX) requires macOS on Apple Silicon")
-	}
-	fmt.Println("Checking for SwiftLM updates...")
-	fmt.Println()
-
-	installed, err := swiftlm.GetInstalledVersion()
-	if err != nil {
-		ui.Fatal("Failed to check installed version: %v", err)
-	}
-
-	release, err := swiftlm.GetLatestVersion()
-	if err != nil {
-		ui.Fatal("Failed to get latest release: %v", err)
-	}
-
-	currentVersion := "Not installed"
-	if installed != nil {
-		currentVersion = installed.TagName
-	}
-
-	fmt.Printf("  %-12s %s\n", "Installed", currentVersion)
-	fmt.Printf("  %-12s %s\n", "Available", release.TagName)
-	fmt.Println()
-
-	if installed != nil && installed.TagName == release.TagName {
-		fmt.Println("SwiftLM is already up to date")
-		return
-	}
-
-	if !forceUpdate {
-		if !ui.PromptYesNo(fmt.Sprintf("Update to %s?", release.TagName), false) {
-			fmt.Println(ui.Muted("Cancelled"))
-			return
-		}
-	}
-
-	fmt.Println()
-	updateSwiftLM()
-	restartServerIfRunning()
-}
-
 func runUpdateSelf(cmd *cobra.Command, args []string) {
 	fmt.Println("Checking for lleme updates...")
 	fmt.Println()
@@ -344,14 +262,6 @@ func updateLlamaCpp() {
 		ui.Fatal("Failed to install llama.cpp: %v", err)
 	}
 	fmt.Printf("Updated to llama.cpp %s\n", version.TagName)
-}
-
-func updateSwiftLM() {
-	version, err := swiftlm.InstallLatest(func(msg string) { fmt.Println(msg) })
-	if err != nil {
-		ui.Fatal("Failed to install SwiftLM: %v", err)
-	}
-	fmt.Printf("Updated to SwiftLM %s\n", version.TagName)
 }
 
 func joinWithAnd(items []string) string {

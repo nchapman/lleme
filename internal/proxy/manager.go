@@ -574,8 +574,8 @@ func optionsChanged(runtime Runtime, current, new map[string]any) bool {
 	}
 
 	// Compare the options that matter for this runtime's model loading.
-	// Each Runtime declares its own list so changing a llama-only key
-	// doesn't trigger a reload on SwiftLM (and vice versa).
+	// Each Runtime declares its own list so only reload-worthy keys
+	// trigger a restart.
 	curNorm := normalizeOptionKeys(current)
 	newNorm := normalizeOptionKeys(new)
 	for _, key := range runtime.SignificantOptions() {

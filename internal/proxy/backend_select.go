@@ -20,7 +20,10 @@ func (m *ModelManager) selectRuntime(user, repo, quant string) (Runtime, error) 
 	case hf.BackendGGUF:
 		return NewLlamaRuntime(m.appConfig), nil
 	case hf.BackendMLX:
-		return NewSwiftLMRuntime(m.appConfig), nil
+		// Metadata recorded by lleme versions that shipped the SwiftLM/MLX
+		// backend. The runtime is gone; tell the user how to move forward
+		// instead of failing with a generic unknown-kind error.
+		return nil, fmt.Errorf("MLX models are no longer supported (the SwiftLM backend was removed); pull the GGUF build of this model instead")
 	default:
 		// Unreachable today: GetBackendKind already rejected anything that
 		// isn't BackendGGUF / BackendMLX. Kept as a belt-and-suspenders

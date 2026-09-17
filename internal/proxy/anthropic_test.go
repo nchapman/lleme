@@ -1282,7 +1282,7 @@ func TestTranslateAnthropicRequest_ThinkingBlockHandling(t *testing.T) {
 }
 
 // Anthropic supports `source.type: "url"` for images, but llama-server and
-// SwiftLM don't fetch URLs at load time — passing one through would surface
+// backends don't fetch URLs at load time — passing one through would surface
 // as an opaque backend error. We reject with a clear actionable message.
 func TestTranslateAnthropicRequest_ImageURLSourceRejected(t *testing.T) {
 	in := []byte(`{
