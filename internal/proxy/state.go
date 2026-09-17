@@ -119,8 +119,8 @@ func isProcessRunning(pid int) bool {
 	return process.Signal(syscall.Signal(0)) == nil
 }
 
-// CleanupOrphanedBackends kills any orphaned backend processes (llama-server
-// or SwiftLM) from a previous proxy instance that crashed. Returns the
+// CleanupOrphanedBackends kills any orphaned backend process
+// (llama-server) from a previous proxy instance that crashed. Returns the
 // number of processes killed.
 func CleanupOrphanedBackends() int {
 	state, err := LoadProxyState()
@@ -145,7 +145,7 @@ func CleanupOrphanedBackends() int {
 
 		// Verify this is a known backend process before sending signals.
 		// We don't persist the backend kind in state, so the PID alone is
-		// matched against both llama-server and SwiftLM command names.
+		// matched against the llama-server command name.
 		if !isKnownBackendProcess(backend.PID) {
 			continue
 		}
@@ -180,8 +180,9 @@ func isKnownBackendProcess(pid int) bool {
 // basename, so exact-match is sufficient and safest: a reused PID whose
 // new process merely contains `llama-server` as a substring (wrapper
 // scripts, user binaries like `MyLlamaServerTool`) won't be misidentified
-// as ours. We always exec our own binaries directly via llama.ServerPath()
-// / swiftlm.ServerPath(), so comm is always one of these exact values.
+// as ours. We always exec our own binary directly via llama.ServerPath(),
+// so comm is always one of these exact values. "SwiftLM" no longer has a
+// spawn path — it exists to reap orphans left by SwiftLM-era proxies.
 func cmdlineMatchesBackend(cmdline string) bool {
 	comm := strings.TrimSpace(cmdline)
 	switch comm {

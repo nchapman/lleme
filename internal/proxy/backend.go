@@ -4,16 +4,16 @@ package proxy
 // which binary to run, how to build its CLI args, how to check readiness,
 // and how to recognize fatal startup errors from its logs. ModelManager
 // owns the generic parts (ports, logs, LRU, idle eviction, signal
-// handling) and delegates the rest through this interface so llama-server
-// and future backends (SwiftLM/MLX) can coexist.
+// handling) and delegates the rest through this interface so additional
+// backends can coexist with llama-server.
 type Runtime interface {
 	Kind() BackendKind
 
 	// HFAppName returns the HuggingFace "apps=" filter value that lists
-	// models this backend can load (e.g. "llama.cpp" for GGUF,
-	// "mlx-lm" for MLX). The search/trending UI joins the names of all
-	// registered runtimes into one filter so adding a backend doesn't
-	// require editing the discovery surface.
+	// models this backend can load (e.g. "llama.cpp" for GGUF). The
+	// search/trending UI joins the names of all registered runtimes into
+	// one filter so adding a backend doesn't require editing the
+	// discovery surface.
 	HFAppName() string
 
 	// BinaryPath returns the absolute path to the executable.
@@ -46,7 +46,4 @@ type Runtime interface {
 // BackendKind identifies a backend implementation.
 type BackendKind string
 
-const (
-	BackendKindLlama BackendKind = "llama"
-	BackendKindMLX   BackendKind = "mlx"
-)
+const BackendKindLlama BackendKind = "llama"

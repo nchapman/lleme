@@ -15,7 +15,7 @@ var searchCmd = &cobra.Command{
 	Use:     "search [query]",
 	Short:   "Search Hugging Face for compatible models",
 	GroupID: "discovery",
-	Long:    "Search Hugging Face for models compatible with any registered backend (GGUF and MLX today). If no query is provided, shows trending models.",
+	Long:    "Search Hugging Face for GGUF models compatible with llama.cpp. If no query is provided, shows trending models.",
 	Args:    cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		cfg, err := config.Load()

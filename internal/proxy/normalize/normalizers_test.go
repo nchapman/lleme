@@ -27,28 +27,6 @@ func encode(t *testing.T, obj chunkObject) string {
 	return string(out)
 }
 
-func TestFilterPrefillProgress(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		keep bool
-	}{
-		{"chat.completion.chunk passthrough", `{"object":"chat.completion.chunk"}`, true},
-		{"chat.completion passthrough", `{"object":"chat.completion"}`, true},
-		{"prefill_progress dropped", `{"object":"prefill_progress","fraction":0.5}`, false},
-		{"missing object passthrough", `{"id":"x"}`, true},
-		{"non-string object passthrough", `{"object":42}`, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := filterPrefillProgress(parse(t, tt.in))
-			if got != tt.keep {
-				t.Errorf("filterPrefillProgress(%s) = %v, want %v", tt.in, got, tt.keep)
-			}
-		})
-	}
-}
-
 func TestRewriteModel(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -174,15 +152,11 @@ func TestApplyChunkNormalizersIdempotent(t *testing.T) {
 	for _, in := range inputs {
 		t.Run(in, func(t *testing.T) {
 			first := parse(t, in)
-			if !applyChunkNormalizers(first, opts) {
-				t.Fatalf("first pass dropped frame unexpectedly")
-			}
+			applyChunkNormalizers(first, opts)
 			firstOut := encode(t, first)
 
 			second := parse(t, firstOut)
-			if !applyChunkNormalizers(second, opts) {
-				t.Fatalf("second pass dropped frame unexpectedly")
-			}
+			applyChunkNormalizers(second, opts)
 			secondOut := encode(t, second)
 
 			if firstOut != secondOut {

@@ -33,9 +33,9 @@ func loadMetadataFrom(path string) *ModelMetadata {
 
 // LocalModel describes a downloaded model ready to serve. It's the
 // backend-neutral entry that `lleme list` and `lleme remove` work against.
-// Path is the file (single GGUF) or directory (split GGUF, MLX tree) the
-// server will be pointed at; Size is the on-disk total, including split
-// shards and sibling tokenizer files for MLX.
+// Path is the file (single GGUF) or directory (split GGUF, or a legacy
+// MLX tree pulled by lleme versions that shipped SwiftLM); Size is the
+// on-disk total.
 type LocalModel struct {
 	User     string
 	Repo     string
@@ -216,10 +216,10 @@ func hasGGUFInside(dir string) bool {
 }
 
 // dirSize recursively sums the sizes of every regular file under dir.
-// GGUF split trees are flat, but MLX pulls preserve the HuggingFace tree
-// layout (e.g. `snapshots/<rev>/config.json`) via binaryrelease.SafeJoin,
-// so a flat scan would undercount MLX model sizes in list / remove / status
-// output. Symlinks are not followed; unreadable entries are skipped.
+// GGUF split trees are flat, but legacy MLX pulls preserve the HuggingFace
+// tree layout (e.g. `snapshots/<rev>/config.json`), so a flat scan would
+// undercount those models in list / remove / status output. Symlinks are
+// not followed; unreadable entries are skipped.
 func dirSize(dir string) int64 {
 	var total int64
 	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
@@ -242,7 +242,8 @@ func dirSize(dir string) int64 {
 // RemoveLocalModel deletes everything on disk for a single quant and
 // tidies up empty parent directories. Safe to call for either backend.
 func RemoveLocalModel(m LocalModel) error {
-	// Primary payload: file for a single GGUF, directory for split GGUF or MLX.
+	// Primary payload: file for a single GGUF, directory for split GGUF or
+	// legacy MLX.
 	info, err := os.Stat(m.Path)
 	if err != nil {
 		return fmt.Errorf("stat %s: %w", m.Path, err)
@@ -260,7 +261,8 @@ func RemoveLocalModel(m LocalModel) error {
 	// Associated per-quant files (best-effort — missing is fine).
 	_ = os.Remove(GetManifestFilePath(m.User, m.Repo, m.Quant))
 	_ = os.Remove(GetMMProjFilePath(m.User, m.Repo, m.Quant))
-	_ = os.Remove(GetMLXManifestFilePath(m.User, m.Repo, m.Quant))
+	// Legacy MLX manifest from lleme versions that shipped SwiftLM.
+	_ = os.Remove(filepath.Join(GetModelPath(m.User, m.Repo), m.Quant+"-mlx-manifest.json"))
 
 	// Drop the quant entry from metadata.yaml so it stops appearing in list.
 	if meta, err := LoadMetadata(m.User, m.Repo); err == nil {

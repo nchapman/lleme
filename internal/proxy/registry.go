@@ -10,7 +10,6 @@ package proxy
 func AllRuntimes() []Runtime {
 	return []Runtime{
 		NewLlamaRuntime(nil),
-		NewSwiftLMRuntime(nil),
 	}
 }
 

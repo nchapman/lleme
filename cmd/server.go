@@ -67,7 +67,7 @@ Use --host, --port, and --max-models to override the values from config.`,
 		if err := validateServerFlags(); err != nil {
 			ui.Fatal("%v", err)
 		}
-		if err := ensureBackends(backendsForLocalModels()); err != nil {
+		if err := ensureLlamaBackend(); err != nil {
 			ui.Fatal("%v", err)
 		}
 	},

@@ -235,13 +235,8 @@ func TestCmdlineMatchesBackend(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "SwiftLM basename from ps",
+			name:     "SwiftLM basename from ps (orphan reap from pre-removal proxies)",
 			cmdline:  "SwiftLM\n",
-			expected: true,
-		},
-		{
-			name:     "SwiftLM no trailing whitespace",
-			cmdline:  "SwiftLM",
 			expected: true,
 		},
 		{

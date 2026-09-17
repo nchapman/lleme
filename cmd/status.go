@@ -8,7 +8,6 @@ import (
 
 	"github.com/nchapman/lleme/internal/llama"
 	"github.com/nchapman/lleme/internal/proxy"
-	"github.com/nchapman/lleme/internal/swiftlm"
 	"github.com/nchapman/lleme/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -96,20 +95,13 @@ var statusCmd = &cobra.Command{
 	},
 }
 
-// installedBackendTags returns the installed tags for each backend that has
-// a version file on disk, or "" for backends that aren't installed. On
-// unsupported platforms SwiftLM is always "". Callers hand both into
-// ui.BackendsCredit which joins the non-empty set.
-func installedBackendTags() (llamaTag, swiftTag string) {
+// installedBackendTags returns the installed llama.cpp tag, or "" when not
+// installed. Callers hand it to ui.BackendsCredit.
+func installedBackendTags() string {
 	if installed, _ := llama.GetInstalledVersion(); installed != nil {
-		llamaTag = installed.TagName
+		return installed.TagName
 	}
-	if swiftlm.IsSupported() {
-		if installed, _ := swiftlm.GetInstalledVersion(); installed != nil {
-			swiftTag = installed.TagName
-		}
-	}
-	return llamaTag, swiftTag
+	return ""
 }
 
 func getProxyStatus(proxyURL string) (*proxy.ProxyStatus, error) {

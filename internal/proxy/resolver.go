@@ -10,9 +10,9 @@ import (
 )
 
 // DownloadedModel represents a model that has been downloaded locally.
-// Backend is the runtime kind (hf.BackendGGUF | hf.BackendMLX). ModelPath
-// is the file llama-server would open (single GGUF or first split) or the
-// MLX directory SwiftLM is pointed at.
+// Backend is the runtime kind (hf.BackendGGUF, or hf.BackendMLX for models
+// pulled by lleme versions that shipped SwiftLM). ModelPath is the file
+// llama-server opens (single GGUF or first split shard).
 type DownloadedModel struct {
 	User      string
 	Repo      string
@@ -35,9 +35,8 @@ func NewModelResolver() *ModelResolver {
 }
 
 // ListDownloadedModels returns every locally-downloaded model. Delegates to
-// the metadata-driven hf.ListLocalModels so MLX trees are first-class;
-// ModelPath is adjusted for GGUF split layouts so llama-server gets the
-// first shard path it expects.
+// the metadata-driven hf.ListLocalModels; ModelPath is adjusted for GGUF
+// split layouts so llama-server gets the first shard path it expects.
 func (r *ModelResolver) ListDownloadedModels() ([]DownloadedModel, error) {
 	locals, err := hf.ListLocalModelsInDir(r.modelsPath)
 	if err != nil {
@@ -47,7 +46,7 @@ func (r *ModelResolver) ListDownloadedModels() ([]DownloadedModel, error) {
 	for _, m := range locals {
 		path := m.Path
 		// Inventory returns the quant directory for split GGUF; llama-server
-		// wants the first shard. MLX stays as the directory.
+		// wants the first shard.
 		if m.Backend == hf.BackendGGUF && !strings.HasSuffix(path, ".gguf") {
 			if first := hf.FindFirstSplitFile(path); first != "" {
 				path = first

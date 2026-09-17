@@ -13,7 +13,6 @@ import (
 
 	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/fileutil"
-	"github.com/nchapman/lleme/internal/logs"
 	"github.com/nchapman/lleme/internal/version"
 	"gopkg.in/yaml.v3"
 )
@@ -327,7 +326,8 @@ type ModelMetadata struct {
 type QuantMetadata struct {
 	LastUsed     time.Time `yaml:"last_used,omitempty"`
 	DownloadedAt time.Time `yaml:"downloaded_at,omitempty"`
-	// Backend identifies the runtime that serves this quant: "gguf" or "mlx".
+	// Backend identifies the runtime that serves this quant: "gguf", or
+	// "mlx" for models pulled by lleme versions that shipped SwiftLM.
 	// Empty in legacy metadata files — treat as "gguf" (the only kind lleme
 	// could pull before MLX support landed).
 	Backend string `yaml:"backend,omitempty"`
@@ -390,36 +390,13 @@ func SetBackendKind(user, repo, quant, kind string) error {
 
 // Known backend kinds as persisted in metadata.yaml. These identify the
 // on-disk model format; the proxy maps them to a concrete Runtime.
+// BackendMLX is legacy: those models were pulled by lleme versions that
+// shipped the SwiftLM runtime, which has since been removed. They still
+// list and remove cleanly; loading one returns a clear error.
 const (
 	BackendGGUF = "gguf"
 	BackendMLX  = "mlx"
 )
-
-// BackendKindForModelName parses a "user/repo:quant" reference and resolves
-// its backend kind via metadata.yaml. Falls back to BackendGGUF for any
-// parse or read error — callers treat the result as a hint for layering
-// backend-specific options, not an authoritative runtime selection.
-func BackendKindForModelName(fullName string) string {
-	colon := strings.LastIndex(fullName, ":")
-	if colon < 0 {
-		return BackendGGUF
-	}
-	repoPart, quant := fullName[:colon], fullName[colon+1:]
-	slash := strings.Index(repoPart, "/")
-	if slash < 0 {
-		return BackendGGUF
-	}
-	kind, err := GetBackendKind(repoPart[:slash], repoPart[slash+1:], quant)
-	if err != nil {
-		// Genuinely corrupt / unreadable metadata lands here; the "missing
-		// file" case returns (BackendGGUF, nil) and stays silent. Warn so a
-		// user seeing the wrong runtime dispatched to an MLX model has a
-		// log entry to correlate with.
-		logs.Warn("BackendKindForModelName falling back to gguf", "model", fullName, "error", err)
-		return BackendGGUF
-	}
-	return kind
-}
 
 // GetBackendKind returns the recorded backend kind for a quant. A missing
 // metadata file or an empty `backend:` field resolves to "gguf" (the only

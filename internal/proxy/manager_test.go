@@ -283,28 +283,22 @@ func TestOptionsChanged(t *testing.T) {
 	}
 }
 
-// Each runtime has its own reload-worthy key list. A SwiftLM-only flag
-// change must trigger a reload when the backend is SwiftLM, and NOT when
-// the backend is llama (which ignores it).
+// Each runtime has its own reload-worthy key list; only keys on the
+// runtime's SignificantOptions list trigger a reload.
 func TestOptionsChangedPerRuntime(t *testing.T) {
+	// Keys off the llama list must not trigger a reload.
 	cur := map[string]any{"turbo-kv": false}
 	next := map[string]any{"turbo-kv": true}
 
-	if !optionsChanged(NewSwiftLMRuntime(nil), cur, next) {
-		t.Error("SwiftLM: turbo-kv change should trigger a reload")
-	}
 	if optionsChanged(NewLlamaRuntime(nil), cur, next) {
 		t.Error("llama: turbo-kv is not a llama option; should not trigger a reload")
 	}
 
-	// Symmetric check: mirostat matters to llama, not SwiftLM.
+	// Symmetric check: flash-attn matters to llama.
 	cur = map[string]any{"flash-attn": "auto"}
 	next = map[string]any{"flash-attn": "on"}
 	if !optionsChanged(NewLlamaRuntime(nil), cur, next) {
 		t.Error("llama: flash-attn change should trigger a reload")
-	}
-	if optionsChanged(NewSwiftLMRuntime(nil), cur, next) {
-		t.Error("SwiftLM: flash-attn is not a SwiftLM option; should not trigger a reload")
 	}
 }
 

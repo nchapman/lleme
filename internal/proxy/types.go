@@ -35,11 +35,11 @@ func (s BackendStatus) String() string {
 }
 
 // Backend represents a running server instance for a specific model.
-// The serving process is produced by Runtime (llama-server, SwiftLM, ...).
+// The serving process is produced by its Runtime (llama-server today).
 type Backend struct {
 	mu           sync.RWMutex
 	ModelName    string         // Full model reference: "bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M"
-	ModelPath    string         // Absolute path to the model (file for GGUF, directory for MLX)
+	ModelPath    string         // Absolute path to the model (file for single GGUF, directory for split GGUF)
 	Runtime      Runtime        // Strategy for starting/health-checking this backend (exposes Kind())
 	Port         int            // Port this backend is listening on
 	Process      *os.Process    // The backend server process

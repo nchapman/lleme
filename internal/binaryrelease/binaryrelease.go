@@ -279,8 +279,8 @@ func ExtractTarGz(archivePath, destDir string) error {
 
 // SafeJoin returns absDest/rel, guaranteed to live under absDest. Rejects
 // absolute entry names, .. traversal, and any path that lexically escapes
-// absDest. Used by ExtractTarGz and by callers (e.g. hf.PullMLXModel) that
-// need to join an attacker-influenced relative path onto a local root.
+// absDest. Used by ExtractTarGz and by callers that need to join an
+// attacker-influenced relative path onto a local root.
 func SafeJoin(absDest, name string) (string, error) {
 	clean := filepath.Clean(name)
 	if filepath.IsAbs(clean) {

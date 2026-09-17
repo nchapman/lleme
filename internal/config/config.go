@@ -47,7 +47,6 @@ type Config struct {
 	HuggingFace HuggingFace `yaml:"huggingface"`
 	Server      Server      `yaml:"server"`
 	LlamaCpp    LlamaCpp    `yaml:"llamacpp"`
-	SwiftLM     SwiftLM     `yaml:"swiftlm"`
 }
 
 type HuggingFace struct {
@@ -60,27 +59,9 @@ type LlamaCpp struct {
 	Options    map[string]any `yaml:"options,omitempty"`
 }
 
-// SwiftLM holds settings for the MLX / SwiftLM runtime. Scoped separately
-// from LlamaCpp so flags from one backend don't bleed into the other.
-type SwiftLM struct {
-	AutoUpdate *bool          `yaml:"auto_update,omitempty"`
-	Options    map[string]any `yaml:"options,omitempty"`
-}
-
 // AutoUpdateEnabled reports whether background llama.cpp updates are enabled.
 // Defaults to true when unset so fresh installs stay current without manual action.
 func (c *LlamaCpp) AutoUpdateEnabled() bool {
-	if c.AutoUpdate == nil {
-		return true
-	}
-	return *c.AutoUpdate
-}
-
-// AutoUpdateEnabled reports whether background SwiftLM updates are enabled.
-// Defaults to true for parity with LlamaCpp. No-ops on non-darwin-arm64
-// platforms regardless of this setting — gated by swiftlm.IsSupported() at
-// the call site.
-func (c *SwiftLM) AutoUpdateEnabled() bool {
 	if c.AutoUpdate == nil {
 		return true
 	}
@@ -157,17 +138,6 @@ func DefaultConfig() *Config {
 			DefaultQuant: "Q4_K_M",
 		},
 		LlamaCpp: LlamaCpp{},
-		// SwiftLM defaults `thinking` ON to match llama.cpp's
-		// out-of-the-box behavior. llama-server defaults to
-		// `--reasoning-format auto`, which extracts <think>...</think>
-		// blocks into reasoning_content. Without this default, MLX
-		// users see raw <think> tags in content and clients that key
-		// on reasoning_content (TUI, Anthropic translator) lose the
-		// reasoning split. Users can disable per-config or via the
-		// `--thinking=false` flag.
-		SwiftLM: SwiftLM{
-			Options: map[string]any{"thinking": true},
-		},
 		Server: Server{
 			Host:           "127.0.0.1",
 			Port:           11313,
@@ -248,38 +218,6 @@ llamacpp:
 
     # --- Reasoning models ---
     # reasoning-format: auto   # Thinking token handling (auto, none, deepseek)
-
-# SwiftLM (MLX) server settings — only applies to MLX-format models on
-# Apple Silicon. Unknown keys are silently dropped, so llamacpp options
-# above won't break MLX backends.
-swiftlm:
-  # Auto-update SwiftLM in the background on server start (default: true).
-  # Has no effect on non-Apple-Silicon hosts since SwiftLM isn't supported
-  # there.
-  # auto_update: true
-
-  options:
-    # --- Mode toggles ---
-    # 'thinking' is on by default for parity with llama.cpp, which
-    # parses <think>...</think> into reasoning_content out of the
-    # box (--reasoning-format auto). Set to false to pass <think>
-    # tags through verbatim as content.
-    thinking: true
-    # vision: false            # Enable VLM (image inputs)
-    # audio: false             # Enable ALM (audio inputs)
-
-    # --- Core ---
-    # ctx-size: 8192           # Context window (KV cache)
-    # max-tokens: 2048         # Default max tokens per request
-    # parallel: 1              # Parallel request slots
-    # gpu-layers: auto         # "auto" or integer
-
-    # --- Sampling defaults (overridable per request) ---
-    # temp: 0.6                # Temperature (0 = greedy)
-    # top-p: 1.0               # Top-p / nucleus sampling
-    # top-k: 50                # Top-k (0 = disabled)
-    # min-p: 0.0               # Min-p sampling
-    # repeat-penalty: 1.0      # Repetition penalty
 `
 
 func Load() (*Config, error) {
@@ -341,17 +279,6 @@ func SaveDefault() error {
 // GetOption returns a llama-server option value from the config.
 // Returns the value and true if found, or nil and false if not set.
 func (c *LlamaCpp) GetOption(key string) (any, bool) {
-	if c.Options == nil {
-		return nil, false
-	}
-	val, ok := c.Options[key]
-	return val, ok
-}
-
-// GetOption returns a SwiftLM option value from the config.
-// Mirrors LlamaCpp.GetOption so the options.Resolver can dispatch by
-// backend kind without peeking at field names.
-func (c *SwiftLM) GetOption(key string) (any, bool) {
 	if c.Options == nil {
 		return nil, false
 	}
