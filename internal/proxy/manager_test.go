@@ -2,9 +2,82 @@ package proxy
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/nchapman/lleme/internal/config"
 )
+
+func TestLlamaBuildArgsTranslatesLegacyMlock(t *testing.T) {
+	t.Setenv("LLEME_HOME", t.TempDir())
+	rt := NewLlamaRuntime(&config.Config{
+		LlamaCpp: config.LlamaCpp{Options: map[string]any{"mlock": true}},
+	})
+	backend := &Backend{
+		ModelName: "user/repo:Q4_K_M",
+		ModelPath: "/nonexistent/model.gguf",
+		Port:      49152,
+	}
+
+	args := rt.BuildArgs(backend, "127.0.0.1")
+
+	if slices.Contains(args, "--mlock") {
+		t.Errorf("Expected --mlock to be dropped, got args: %v", args)
+	}
+	i := slices.Index(args, "--load-mode")
+	if i < 0 || i+1 >= len(args) || args[i+1] != "mlock" {
+		t.Errorf("Expected --load-mode mlock in args, got: %v", args)
+	}
+}
+
+func TestTranslateLegacyOptions(t *testing.T) {
+	tests := []struct {
+		name     string
+		in       map[string]any
+		expected map[string]any
+	}{
+		{
+			name:     "legacy mlock true becomes load-mode mlock",
+			in:       map[string]any{"mlock": true},
+			expected: map[string]any{"load-mode": "mlock"},
+		},
+		{
+			name:     "legacy mlock false is dropped without adding load-mode",
+			in:       map[string]any{"mlock": false},
+			expected: map[string]any{},
+		},
+		{
+			name:     "explicit load-mode wins over legacy mlock",
+			in:       map[string]any{"mlock": true, "load-mode": "mmap+mlock"},
+			expected: map[string]any{"load-mode": "mmap+mlock"},
+		},
+		{
+			name:     "snake_case load_mode also suppresses legacy mlock",
+			in:       map[string]any{"mlock": true, "load_mode": "mmap"},
+			expected: map[string]any{"load_mode": "mmap"},
+		},
+		{
+			name:     "non-bool mlock still dropped",
+			in:       map[string]any{"mlock": "true"},
+			expected: map[string]any{},
+		},
+		{
+			name:     "unrelated options untouched",
+			in:       map[string]any{"ctx-size": 8192, "temp": 0.7},
+			expected: map[string]any{"ctx-size": 8192, "temp": 0.7},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			translateLegacyOptions(tt.in)
+			if !reflect.DeepEqual(tt.in, tt.expected) {
+				t.Errorf("translateLegacyOptions() = %v, want %v", tt.in, tt.expected)
+			}
+		})
+	}
+}
 
 func TestBuildLlamaServerArgs(t *testing.T) {
 	tests := []struct {

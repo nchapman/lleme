@@ -237,7 +237,7 @@ llamacpp:
     # --- Memory ---
     # cache-type-k: f16        # KV cache type for K (f16, q8_0, q4_0, etc.)
     # cache-type-v: f16        # KV cache type for V
-    # mlock: false             # Lock model in RAM (prevents swapping)
+    # load-mode: auto          # Load mode (auto, none, mmap, mlock, mmap+mlock, dio)
 
     # --- Sampling defaults ---
     # temp: 0.8                # Temperature

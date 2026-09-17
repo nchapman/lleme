@@ -61,6 +61,7 @@ func (r *LlamaRuntime) BuildArgs(backend *Backend, host string) []string {
 		maps.Copy(mergedOptions, r.appConfig.LlamaCpp.Options)
 	}
 	maps.Copy(mergedOptions, backend.Options)
+	translateLegacyOptions(mergedOptions)
 
 	args = append(args, buildLlamaServerArgs(mergedOptions)...)
 	return args
@@ -82,9 +83,26 @@ func (r *LlamaRuntime) SignificantOptions() []string {
 		"ubatch-size",
 		"flash-attn",
 		"mlock",
+		"load-mode",
 		"cache-type-k",
 		"cache-type-v",
 	}
+}
+
+// translateLegacyOptions rewrites options for flags llama.cpp has removed.
+// --mlock was replaced by --load-mode (auto, none, mmap, mlock, mmap+mlock,
+// dio); legacy mlock: true configs become load-mode: mlock unless the user
+// set load-mode explicitly (in either kebab- or snake_case). The mlock key
+// is always dropped so --mlock is never passed to current llama-server builds.
+func translateLegacyOptions(opts map[string]any) {
+	if mlock, ok := opts["mlock"].(bool); ok && mlock {
+		_, hasKebab := opts["load-mode"]
+		_, hasSnake := opts["load_mode"]
+		if !hasKebab && !hasSnake {
+			opts["load-mode"] = "mlock"
+		}
+	}
+	delete(opts, "mlock")
 }
 
 // findMMProjForModel parses the model name and checks if an mmproj file exists.
