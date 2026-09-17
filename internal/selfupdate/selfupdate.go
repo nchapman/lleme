@@ -14,10 +14,11 @@ import (
 	"github.com/nchapman/lleme/internal/version"
 )
 
-const (
-	llemeRepo = "nchapman/lleme"
-	apiBase   = "https://api.github.com/repos/" + llemeRepo
-)
+const llemeRepo = "nchapman/lleme"
+
+// apiBase is a var (not a const) so tests can point version checks at an
+// httptest server.
+var apiBase = "https://api.github.com/repos/" + llemeRepo
 
 type Release struct {
 	TagName string `json:"tag_name"`

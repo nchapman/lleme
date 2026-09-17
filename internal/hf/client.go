@@ -16,9 +16,14 @@ import (
 	"github.com/nchapman/lleme/internal/version"
 )
 
+// baseURL and apiBase are vars (not consts) so tests can point the client at
+// an httptest server instead of huggingface.co.
+var (
+	baseURL = "https://huggingface.co"
+	apiBase = "https://huggingface.co/api"
+)
+
 const (
-	baseURL    = "https://huggingface.co"
-	apiBase    = "https://huggingface.co/api"
 	maxRetries = 3
 	retryDelay = 1 * time.Second
 )

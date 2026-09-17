@@ -3,8 +3,16 @@ package proxy
 import (
 	"fmt"
 
+	"github.com/nchapman/lleme/internal/config"
 	"github.com/nchapman/lleme/internal/hf"
 )
+
+// newLlamaRuntime is the constructor seam selectRuntime uses. It exists as a
+// var so the lifecycle tests can substitute a fake Runtime and exercise the
+// full start/stop machinery without llama.cpp installed.
+var newLlamaRuntime = func(cfg *config.Config) Runtime {
+	return NewLlamaRuntime(cfg)
+}
 
 // selectRuntime resolves a Runtime for the given model based on the backend
 // kind recorded in metadata.yaml at pull time. Legacy metadata without a
@@ -18,7 +26,7 @@ func (m *ModelManager) selectRuntime(user, repo, quant string) (Runtime, error) 
 	}
 	switch kind {
 	case hf.BackendGGUF:
-		return NewLlamaRuntime(m.appConfig), nil
+		return newLlamaRuntime(m.appConfig), nil
 	case hf.BackendMLX:
 		// Metadata recorded by lleme versions that shipped the SwiftLM/MLX
 		// backend. The runtime is gone; tell the user how to move forward
