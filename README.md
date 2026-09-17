@@ -21,6 +21,12 @@ Drop-in replacement for OpenAI **and** Anthropic APIs — works with Claude Code
 brew install nchapman/tap/lleme
 ```
 
+Homebrew 6+ requires [trusting third-party taps](https://docs.brew.sh/Tap-Trust). The fully qualified name above trusts only the `lleme` formula. If you've tapped the repo manually and install by short name, trust the formula first:
+```bash
+brew trust --formula nchapman/tap/lleme
+brew install lleme
+```
+
 **Go** (requires Go 1.25+):
 ```bash
 go install github.com/nchapman/lleme@latest
