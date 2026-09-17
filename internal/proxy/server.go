@@ -134,15 +134,12 @@ func (s *Server) autoUpdateLlamaCpp(ctx context.Context) {
 		logs.Debug("llama.cpp auto-update check failed", "error", err)
 		return
 	}
-	if latest == nil {
+	if s.appConfig == nil || !s.appConfig.LlamaCpp.AutoUpdateEnabled() || latest == nil {
 		return
 	}
 	installedTag := ""
 	if installed != nil {
 		installedTag = installed.TagName
-	}
-	if !(s.appConfig != nil && s.appConfig.LlamaCpp.AutoUpdateEnabled()) {
-		return
 	}
 	logs.Info("Auto-updating llama.cpp in background", "from", installedTag, "to", latest.TagName)
 
