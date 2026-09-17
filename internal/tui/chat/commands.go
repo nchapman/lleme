@@ -8,10 +8,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/nchapman/lleme/internal/presets"
 	"github.com/nchapman/lleme/internal/server"
-	"github.com/nchapman/lleme/internal/tui/components"
 )
 
-// handleCommand processes a slash command and returns a command
+// handleCommand processes a slash command. It runs synchronously inside
+// Update: local state mutations happen on the Update goroutine, and the
+// returned tea.Cmd carries only async work (model reload I/O) or delivers
+// a precomputed result message.
 func (m *Model) handleCommand(input string) tea.Cmd {
 	parts := strings.Fields(input)
 	if len(parts) == 0 {
@@ -21,55 +23,58 @@ func (m *Model) handleCommand(input string) tea.Cmd {
 	cmd := strings.ToLower(parts[0])
 	args := parts[1:]
 
-	return func() tea.Msg {
-		switch cmd {
-		case "/help", "/?":
-			return CommandResultMsg{Message: m.helpText()}
+	switch cmd {
+	case "/help", "/?":
+		return staticMsg(CommandResultMsg{Message: m.helpText()})
 
-		case "/bye", "/exit", "/quit":
-			return CommandResultMsg{Message: "Goodbye!", Exit: true}
+	case "/bye", "/exit", "/quit":
+		return staticMsg(CommandResultMsg{Message: "Goodbye!", Exit: true})
 
-		case "/clear":
-			m.initSystemPrompt()
-			m.messages.ClearMessages()
-			return CommandResultMsg{Message: "Conversation cleared"}
+	case "/clear":
+		m.initSystemPrompt()
+		m.messages.ClearMessages()
+		return staticMsg(CommandResultMsg{Message: "Conversation cleared"})
 
-		case "/system":
-			if len(args) == 0 {
-				// Show current system prompt
-				if len(m.chatMessages) > 0 && m.chatMessages[0].Role == "system" {
-					return CommandResultMsg{Message: "System prompt:\n" + m.chatMessages[0].Content}
-				}
-				return CommandResultMsg{Message: "No system prompt set"}
+	case "/system":
+		if len(args) == 0 {
+			// Show current system prompt
+			if len(m.chatMessages) > 0 && m.chatMessages[0].Role == "system" {
+				return staticMsg(CommandResultMsg{Message: "System prompt:\n" + m.chatMessages[0].Content})
 			}
-			// Set new system prompt
-			newPrompt := strings.Join(args, " ")
-			m.chatMessages = []server.ChatMessage{{Role: "system", Content: newPrompt}}
-			m.messages.ClearMessages()
-			return CommandResultMsg{Message: "System prompt updated, conversation cleared"}
-
-		case "/set":
-			if len(args) < 2 {
-				return CommandResultMsg{
-					Message: "Usage: /set <option> <value>\nOptions: temp, top-p, top-k, repeat-penalty, presence-penalty, frequency-penalty, min-p, ctx-size, gpu-layers, threads",
-					IsError: true,
-				}
-			}
-			return m.handleSet(args[0], args[1])
-
-		case "/reload":
-			return m.handleReload()
-
-		case "/show":
-			return CommandResultMsg{Message: m.showSettings()}
-
-		default:
-			return CommandResultMsg{
-				Message: fmt.Sprintf("Unknown command: %s (type /? for help)", cmd),
-				IsError: true,
-			}
+			return staticMsg(CommandResultMsg{Message: "No system prompt set"})
 		}
+		// Set new system prompt
+		newPrompt := strings.Join(args, " ")
+		m.chatMessages = []server.ChatMessage{{Role: "system", Content: newPrompt}}
+		m.messages.ClearMessages()
+		return staticMsg(CommandResultMsg{Message: "System prompt updated, conversation cleared"})
+
+	case "/set":
+		if len(args) < 2 {
+			return staticMsg(CommandResultMsg{
+				Message: "Usage: /set <option> <value>\nOptions: temp, top-p, top-k, repeat-penalty, presence-penalty, frequency-penalty, min-p, ctx-size, gpu-layers, threads",
+				IsError: true,
+			})
+		}
+		return staticMsg(m.handleSet(args[0], args[1]))
+
+	case "/reload":
+		return m.handleReload()
+
+	case "/show":
+		return staticMsg(CommandResultMsg{Message: m.showSettings()})
+
+	default:
+		return staticMsg(CommandResultMsg{
+			Message: fmt.Sprintf("Unknown command: %s (type /? for help)", cmd),
+			IsError: true,
+		})
 	}
+}
+
+// staticMsg wraps a precomputed message in a tea.Cmd.
+func staticMsg(msg tea.Msg) tea.Cmd {
+	return func() tea.Msg { return msg }
 }
 
 type setOption struct {
@@ -125,15 +130,12 @@ func (m *Model) handleSet(option, value string) CommandResultMsg {
 	return CommandResultMsg{Message: fmt.Sprintf("Set %s = %d", option, iv)}
 }
 
-// handleReload reloads the model with new server options
-func (m *Model) handleReload() CommandResultMsg {
+// handleReload returns a Cmd that performs the reload I/O off the Update
+// goroutine. pendingReload is cleared by Update when the reload succeeds,
+// so a failed reload leaves the change pending for a retry.
+func (m *Model) handleReload() tea.Cmd {
 	if !m.pendingReload {
-		return CommandResultMsg{Message: "No pending server option changes to apply"}
-	}
-
-	// Stop the current model
-	if err := m.api.StopModel(m.model); err != nil {
-		return CommandResultMsg{Message: fmt.Sprintf("Failed to stop model: %v", err), IsError: true}
+		return staticMsg(CommandResultMsg{Message: "No pending server option changes to apply"})
 	}
 
 	var personaOpts map[string]any
@@ -152,12 +154,18 @@ func (m *Model) handleReload() CommandResultMsg {
 	if m.options.ThreadsSet {
 		opts.Threads = server.IntPtr(m.options.Threads)
 	}
-	if err := m.api.Run(m.model, opts); err != nil {
-		return CommandResultMsg{Message: fmt.Sprintf("Failed to reload model: %v", err), IsError: true}
-	}
 
-	m.pendingReload = false
-	return CommandResultMsg{Message: "Model reloaded"}
+	api := m.api
+	model := m.model
+	return func() tea.Msg {
+		if err := api.StopModel(model); err != nil {
+			return CommandResultMsg{Message: fmt.Sprintf("Failed to stop model: %v", err), IsError: true}
+		}
+		if err := api.Run(model, opts); err != nil {
+			return CommandResultMsg{Message: fmt.Sprintf("Failed to reload model: %v", err), IsError: true}
+		}
+		return CommandResultMsg{Message: "Model reloaded", Reloaded: true}
+	}
 }
 
 // helpText returns the help message
@@ -262,17 +270,4 @@ func (m *Model) formatServerOption(name string, sessionVal int, isSet bool, key 
 		config = fmt.Sprintf("%d", v)
 	}
 	return formatSetting(name, session, config, source)
-}
-
-// ClearMessages clears the messages viewport (called from command handler)
-func (m *Model) ClearMessages() {
-	m.messages.ClearMessages()
-}
-
-// AddSystemMessage adds a system message to the viewport
-func (m *Model) AddSystemMessage(content string) {
-	m.messages.AddMessage(components.Message{
-		Role:    components.RoleSystem,
-		Content: content,
-	})
 }

@@ -205,26 +205,6 @@ func TestRotatingWriterSizeRotation(t *testing.T) {
 	}
 }
 
-func TestRotatingWriterPath(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "lleme-logs-test")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	basePath := filepath.Join(tmpDir, "test.log")
-
-	writer, err := NewRotatingWriter(basePath)
-	if err != nil {
-		t.Fatalf("NewRotatingWriter failed: %v", err)
-	}
-	defer writer.Close()
-
-	if writer.Path() != basePath {
-		t.Errorf("Path() = %q, want %q", writer.Path(), basePath)
-	}
-}
-
 func TestNewRotatingWriterRotatesExisting(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "lleme-logs-test")
 	if err != nil {

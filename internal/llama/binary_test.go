@@ -19,6 +19,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/nchapman/lleme/internal/binaryrelease"
 )
 
 func TestGetPlatform(t *testing.T) {
@@ -229,9 +231,9 @@ func TestFindAssetForPlatform(t *testing.T) {
 
 		release := &Release{
 			TagName: "b7751",
-			Assets: []Asset{
-				{Name: "llama-b7751-bin-" + platform + ".tar.gz", BrowserDownloadUrl: "http://example.com/" + expectedPattern},
-				{Name: "llama-b7751-bin-linux-x64.tar.gz", BrowserDownloadUrl: "http://example.com/linux"},
+			Assets: []binaryrelease.Asset{
+				{Name: "llama-b7751-bin-" + platform + ".tar.gz", BrowserDownloadURL: "http://example.com/" + expectedPattern},
+				{Name: "llama-b7751-bin-linux-x64.tar.gz", BrowserDownloadURL: "http://example.com/linux"},
 			},
 		}
 
@@ -252,7 +254,7 @@ func TestFindAssetForPlatform(t *testing.T) {
 	t.Run("returns error for unsupported platform", func(t *testing.T) {
 		release := &Release{
 			TagName: "b7751",
-			Assets: []Asset{
+			Assets: []binaryrelease.Asset{
 				{Name: "llama-b7751-bin-windows-x64.zip"},
 			},
 		}
@@ -266,7 +268,7 @@ func TestFindAssetForPlatform(t *testing.T) {
 	t.Run("returns error when asset not found", func(t *testing.T) {
 		release := &Release{
 			TagName: "b7751",
-			Assets: []Asset{
+			Assets: []binaryrelease.Asset{
 				{Name: "source.tar.gz"},
 			},
 		}
@@ -487,7 +489,7 @@ func TestRemoveOldVersions(t *testing.T) {
 		os.MkdirAll(filepath.Join(tmpDir, "llama-current"), 0755)
 		os.WriteFile(filepath.Join(tmpDir, "version.json"), []byte("{}"), 0644)
 
-		removeOldVersions(tmpDir, "b8169")
+		pruneOldVersions(tmpDir, "b8169", 0)
 
 		// Current version should remain
 		if _, err := os.Stat(filepath.Join(tmpDir, "llama-b8169")); err != nil {
@@ -766,7 +768,7 @@ func TestFetchNightlyTagBlocksDisallowedRedirect(t *testing.T) {
 
 	stable := &Release{
 		TagName: "v0.4.1",
-		Assets:  []Asset{{Name: "nightly-tag.txt", BrowserDownloadUrl: entry.URL + "/nightly-tag.txt"}},
+		Assets:  []binaryrelease.Asset{{Name: "nightly-tag.txt", BrowserDownloadURL: entry.URL + "/nightly-tag.txt"}},
 	}
 	_, err := fetchNightlyTag(stable)
 	if err == nil {
@@ -795,7 +797,7 @@ func TestValidateDownloadURL(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateDownloadURL(tt.url)
+			err := binaryrelease.ValidateURL(releaseConfig(), tt.url)
 			if tt.wantErr && err == nil {
 				t.Errorf("Expected error for %q, got nil", tt.url)
 			}
@@ -808,7 +810,7 @@ func TestValidateDownloadURL(t *testing.T) {
 
 func TestDownloadBinaryRejectsBadURL(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "out.tar.gz")
-	err := DownloadBinary("https://attacker.example.com/evil.tar.gz", dest, nil)
+	err := DownloadBinaryContext(context.Background(), "https://attacker.example.com/evil.tar.gz", dest, nil)
 	if err == nil {
 		t.Fatal("Expected error for disallowed host")
 	}
@@ -831,7 +833,7 @@ func TestDownloadBinaryEnforcesSizeCap(t *testing.T) {
 		withDownloadHost(t, srv)
 
 		dest := filepath.Join(t.TempDir(), "out.tar.gz")
-		err := DownloadBinary(srv.URL+"/asset.tar.gz", dest, nil)
+		err := DownloadBinaryContext(context.Background(), srv.URL+"/asset.tar.gz", dest, nil)
 		if err == nil || !strings.Contains(err.Error(), "exceeds max") {
 			t.Errorf("Expected content-length cap error, got %v", err)
 		}
@@ -857,7 +859,7 @@ func TestDownloadBinaryEnforcesSizeCap(t *testing.T) {
 		withDownloadHost(t, srv)
 
 		dest := filepath.Join(t.TempDir(), "out.tar.gz")
-		err := DownloadBinary(srv.URL+"/asset.tar.gz", dest, nil)
+		err := DownloadBinaryContext(context.Background(), srv.URL+"/asset.tar.gz", dest, nil)
 		if err == nil || !strings.Contains(err.Error(), "exceeded max size") {
 			t.Errorf("Expected streaming overflow error, got %v", err)
 		}
@@ -879,7 +881,7 @@ func TestDownloadBinaryEnforcesSizeCap(t *testing.T) {
 		withDownloadHost(t, srv)
 
 		dest := filepath.Join(t.TempDir(), "out.tar.gz")
-		if err := DownloadBinary(srv.URL+"/asset.tar.gz", dest, nil); err != nil {
+		if err := DownloadBinaryContext(context.Background(), srv.URL+"/asset.tar.gz", dest, nil); err != nil {
 			t.Errorf("Expected success for under-cap payload, got %v", err)
 		}
 		info, err := os.Stat(dest)
@@ -948,7 +950,7 @@ func TestDownloadBinaryBlocksDisallowedRedirect(t *testing.T) {
 	withDownloadHost(t, entry)
 
 	dest := filepath.Join(t.TempDir(), "out.tar.gz")
-	err := DownloadBinary(entry.URL+"/asset.tar.gz", dest, nil)
+	err := DownloadBinaryContext(context.Background(), entry.URL+"/asset.tar.gz", dest, nil)
 	if err == nil {
 		t.Fatal("Expected redirect to attacker host to be blocked")
 	}
@@ -964,8 +966,8 @@ func TestSwapCurrentSymlinkAtomic(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if err := swapCurrentSymlink(tmpDir, "llama-b8169"); err != nil {
-			t.Fatalf("swapCurrentSymlink failed: %v", err)
+		if err := binaryrelease.SwapCurrentSymlink(tmpDir, "llama-current", "llama-b8169"); err != nil {
+			t.Fatalf("SwapCurrentSymlink failed: %v", err)
 		}
 
 		target, err := os.Readlink(filepath.Join(tmpDir, "llama-current"))
@@ -1013,10 +1015,10 @@ func TestSwapCurrentSymlinkAtomic(t *testing.T) {
 
 		// Perform many swaps to widen the observation window.
 		for range 200 {
-			if err := swapCurrentSymlink(tmpDir, "llama-b8169"); err != nil {
+			if err := binaryrelease.SwapCurrentSymlink(tmpDir, "llama-current", "llama-b8169"); err != nil {
 				t.Fatalf("swap to b8169 failed: %v", err)
 			}
-			if err := swapCurrentSymlink(tmpDir, "llama-b8168"); err != nil {
+			if err := binaryrelease.SwapCurrentSymlink(tmpDir, "llama-current", "llama-b8168"); err != nil {
 				t.Fatalf("swap to b8168 failed: %v", err)
 			}
 		}
@@ -1038,7 +1040,7 @@ func TestSwapCurrentSymlinkAtomic(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if err := swapCurrentSymlink(tmpDir, "llama-b8169"); err != nil {
+		if err := binaryrelease.SwapCurrentSymlink(tmpDir, "llama-current", "llama-b8169"); err != nil {
 			t.Fatalf("Expected recovery from stale tmp, got %v", err)
 		}
 		target, err := os.Readlink(filepath.Join(tmpDir, "llama-current"))
@@ -1103,11 +1105,24 @@ func TestPruneRespectsSymlinkTarget(t *testing.T) {
 
 // --- helpers ---
 
-func withAPIBase(t *testing.T, url string) {
+// withAPIBase redirects GitHub API calls at a test server. API fetches now
+// ride the same allow-listed client as downloads, so the test host and http
+// scheme must be admitted too.
+func withAPIBase(t *testing.T, rawURL string) {
 	t.Helper()
 	old := apiBase
-	apiBase = url
-	t.Cleanup(func() { apiBase = old })
+	apiBase = rawURL
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("unexpected API base %q: %v", rawURL, err)
+	}
+	allowedDownloadHosts[u.Hostname()] = true
+	allowedDownloadSchemes["http"] = true
+	t.Cleanup(func() {
+		apiBase = old
+		delete(allowedDownloadHosts, u.Hostname())
+		delete(allowedDownloadSchemes, "http")
+	})
 }
 
 func withDownloadHost(t *testing.T, srv *httptest.Server) {

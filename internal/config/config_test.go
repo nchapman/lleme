@@ -17,8 +17,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.HuggingFace.Token != "" {
 		t.Errorf("Expected empty HuggingFace.Token, got %s", cfg.HuggingFace.Token)
 	}
-	if cfg.HuggingFace.DefaultQuant != "Q4_K_M" {
-		t.Errorf("Expected HuggingFace.DefaultQuant Q4_K_M, got %s", cfg.HuggingFace.DefaultQuant)
+	if cfg.HuggingFace.DefaultQuant != "" {
+		t.Errorf("Expected empty HuggingFace.DefaultQuant (built-in preference order), got %s", cfg.HuggingFace.DefaultQuant)
 	}
 
 	// LlamaCpp defaults - should be empty (let llama-server use its defaults)

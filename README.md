@@ -49,7 +49,7 @@ Run any GGUF model from Hugging Face:
 lleme run unsloth/gemma-4-E2B-it-GGUF
 ```
 
-That's it. lleme picks a sensible quantization (`Q4_K_M` by default, ~3 GB plus a ~1 GB vision projector for this model), starts a proxy, and drops you into an interactive chat.
+That's it. lleme picks a sensible quantization (its built-in preference order prefers `UD-Q4_K_XL`, then `Q4_K_M`; override with `huggingface.default_quant`), starts a proxy, and drops you into an interactive chat.
 
 One-shot prompts and piped input work too:
 
@@ -92,7 +92,7 @@ OpenAI and Anthropic protocols live on the same endpoint. Point any existing cli
 
 ### Automatic Model Serving
 
-A reverse-proxy manages multiple backends. Models load on demand, unload after a configurable idle timeout, and the least-recently-used model is evicted once the memory limit is reached.
+A reverse-proxy manages multiple backends. Models load on demand, unload after a configurable idle timeout, and the least-recently-used model is evicted once the concurrent-model limit (`server.max_models`) is reached.
 
 ### Terminal & Web UI
 
@@ -174,7 +174,7 @@ Any `llama-server` flag can be set under `llamacpp.options`:
 ```yaml
 huggingface:
   token: ""              # or set HF_TOKEN (required for gated models)
-  default_quant: Q4_K_M
+  default_quant: ""      # preferred quant when no tag given (empty = built-in order)
 
 server:
   host: 127.0.0.1        # bind address (0.0.0.0 for all interfaces)

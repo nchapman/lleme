@@ -135,7 +135,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		HuggingFace: HuggingFace{
 			Token:        "",
-			DefaultQuant: "Q4_K_M",
+			DefaultQuant: "",
 		},
 		LlamaCpp: LlamaCpp{},
 		Server: Server{
@@ -161,8 +161,10 @@ const DefaultConfigTemplate = `# Hugging Face settings
 huggingface:
   # Access token for gated models (or set HF_TOKEN env var)
   token: ""
-  # Default quantization when pulling models
-  default_quant: Q4_K_M
+  # Default quantization when no tag is given (e.g. Q6_K).
+  # Leave empty to use lleme's built-in preference order (UD-Q4_K_XL,
+  # then Q4_K_M, ...).
+  default_quant: ""
 
 # lleme server settings
 server:

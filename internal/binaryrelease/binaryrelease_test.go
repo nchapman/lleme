@@ -91,6 +91,57 @@ func TestFetchLatestReleaseRejectsDisallowedHost(t *testing.T) {
 	}
 }
 
+func TestFetchBytes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "b517")
+	}))
+	defer srv.Close()
+
+	cfg := testConfig(t, srv)
+	body, err := FetchBytes(context.Background(), cfg, srv.URL+"/nightly-tag.txt", 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "b517" {
+		t.Errorf("body = %q, want b517", body)
+	}
+}
+
+func TestFetchBytesRejectsOversizedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, strings.Repeat("x", 100))
+	}))
+	defer srv.Close()
+
+	cfg := testConfig(t, srv)
+	_, err := FetchBytes(context.Background(), cfg, srv.URL+"/nightly-tag.txt", 10)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("err = %v, want size-cap rejection", err)
+	}
+}
+
+func TestFetchBytesRejectsNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	cfg := testConfig(t, srv)
+	_, err := FetchBytes(context.Background(), cfg, srv.URL+"/nightly-tag.txt", 1024)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+		t.Errorf("err = %v, want HTTP status in error", err)
+	}
+}
+
+func TestFetchBytesRejectsInvalidMaxBytes(t *testing.T) {
+	cfg := Config{AllowedHosts: map[string]bool{}, AllowedSchemes: DefaultHTTPSOnly()}
+	for _, max := range []int64{0, -1} {
+		if _, err := FetchBytes(context.Background(), cfg, "https://api.github.com/x", max); err == nil {
+			t.Errorf("maxBytes %d: expected error", max)
+		}
+	}
+}
+
 func TestDownload(t *testing.T) {
 	payload := strings.Repeat("x", 300)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

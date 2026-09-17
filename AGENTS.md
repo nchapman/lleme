@@ -7,12 +7,13 @@ This file provides guidance to AI coding agents working with this repository.
 ```bash
 make build                    # Build binary to ./lleme
 make test                     # Run all tests
-make check                    # Format + vet + test (run before committing)
+make check                    # Format + vet + test + lint (run before committing)
+make lint                     # golangci-lint only (CI pins the same version; keep local brew golangci-lint in sync)
 go test ./cmd -run TestName   # Run single test (add -v for verbose)
 go test ./internal/proxy      # Test specific package
 ```
 
-Linting uses golangci-lint with `errcheck` and `unused` disabled.
+Linting uses golangci-lint with `errcheck` disabled.
 
 ## Architecture Overview
 
@@ -82,7 +83,7 @@ Inference options flow through a layered resolver in `internal/options/resolver.
 - **config**: `~/.lleme/config.yaml` global defaults.
 - **llama-server default**: the binary's own default if nothing is set.
 
-The resolver uses **key-existence semantics**: a key with value `0` is distinct from an absent key. Explicit zeros (e.g. `min-p: 0.0`) are honored at every layer. Adjacent helpers: `ResolveFloat` / `ResolveInt` for the session-flag case (zero still means "not set" because CLI flag defaults are zero), `GetConfigFloat` / `GetConfigInt` for the persona-and-below case.
+The resolver uses **key-existence semantics**: a key with value `0` is distinct from an absent key. Explicit zeros (e.g. `min-p: 0.0`) are honored at every layer. Adjacent helpers: `ResolveFloat` / `ResolveInt` for the session-flag case (zero still means "not set" because CLI flag defaults are zero), `GetConfigFloatWithSource` / `GetConfigIntWithSource` for the persona-and-below case.
 
 **Presets** live in `internal/presets/data/*.yaml`, embedded via `go:embed`. Each file defines sampling defaults for a model family and a list of `path.Match` globs against `user/repo`. Matching is case-insensitive and first-match-wins in **alphabetical order** of filename, so more specific files must sort before more general ones (e.g. `qwen3-coder.yaml` before `qwen3.yaml`).
 
