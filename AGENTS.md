@@ -44,7 +44,7 @@ lleme is llama.cpp-only today; the SwiftLM/MLX backend was removed. A single `Ru
 
 **Security-sensitive install code is shared**: `internal/binaryrelease/` owns URL host/scheme allow-lists, download size caps, atomic symlink swap (`llama-current`), and a validating tar extractor (no path traversal, no escaping symlinks). The llama.cpp installer (`internal/llama/binary.go`) wraps these primitives with its repo URL, platform matrix, and `version.json` sibling file.
 
-HuggingFace downloads enforce their own redirect allow-list (`hfAllowedHosts` in `internal/hf/client.go` — huggingface.co + the LFS / xethub CDN hosts) and a per-file size cap derived from the manifest-declared size (2× tolerance). A compromised HF response can't redirect the Authorization-bearing download off-domain, and a server lying about Content-Length can't exhaust the disk.
+HuggingFace downloads enforce their own redirect allow-list (`hfAllowedDomains` in `internal/hf/client.go` — any subdomain of the HF-owned apex domains `hf.co`/`huggingface.co`, covering the LFS and regional xet CDN hosts) and a per-file size cap derived from the manifest-declared size (2× tolerance). A compromised HF response can't redirect the Authorization-bearing download off-domain, and a server lying about Content-Length can't exhaust the disk.
 
 ### Package Structure
 

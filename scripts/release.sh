@@ -52,9 +52,16 @@ if [ "$confirm" != "y" ]; then
     exit 1
 fi
 
-# Run git flow release
-git flow release start "$NEW_VERSION"
-git flow release finish "$NEW_VERSION" -m "Release v$NEW_VERSION"
+# Replicate git flow release start/finish with plain git. (git-flow-avh's
+# getopt parsing breaks on macOS when the tag message contains spaces.)
+git fetch origin main:main
+git checkout -b "release/$NEW_VERSION"
+git checkout main
+git merge --no-ff "release/$NEW_VERSION" -m "Merge branch 'release/$NEW_VERSION'"
+git tag -a "v$NEW_VERSION" -m "Release v$NEW_VERSION"
+git checkout develop
+git merge --no-ff "v$NEW_VERSION"
+git branch -d "release/$NEW_VERSION"
 git push origin main develop --tags
 
 echo ""
