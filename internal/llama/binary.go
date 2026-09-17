@@ -4,9 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,8 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nchapman/lleme/internal/binaryrelease"
 	"github.com/nchapman/lleme/internal/config"
-	"github.com/nchapman/lleme/internal/fileutil"
 	"github.com/nchapman/lleme/internal/version"
 )
 
@@ -95,32 +92,34 @@ var semverTagRe = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
 // hostile response and is rejected outright.
 const maxNightlyTagBytes int64 = 1024
 
-// allowedDownloadHosts are the hosts from which llama.cpp release assets may
-// be fetched. github.com issues 302 redirects to *.githubusercontent.com.
-var allowedDownloadHosts = map[string]bool{
-	"github.com":                           true,
-	"objects.githubusercontent.com":        true,
-	"release-assets.githubusercontent.com": true,
-	"releases.githubusercontent.com":       true,
+// allowedDownloadHosts are the hosts from which llama.cpp release assets and
+// GitHub API responses may be fetched. github.com issues 302 redirects to
+// *.githubusercontent.com for asset downloads. Declared as var so tests can
+// admit an httptest server.
+var allowedDownloadHosts = binaryrelease.DefaultGitHubHosts()
+
+// allowedDownloadSchemes restricts the URL schemes accepted for downloads.
+// In production this is https only; tests override it to include http when
+// pointing at an httptest server.
+var allowedDownloadSchemes = binaryrelease.DefaultHTTPSOnly()
+
+// releaseConfig bundles the download policy knobs the binaryrelease
+// primitives enforce (host/scheme allow-list, size cap, user agent). Built
+// from the package-level vars so tests can retarget it at an httptest server.
+func releaseConfig() binaryrelease.Config {
+	return binaryrelease.Config{
+		AllowedHosts:   allowedDownloadHosts,
+		AllowedSchemes: allowedDownloadSchemes,
+		MaxBytes:       maxDownloadBytes,
+		UserAgent:      version.UserAgent(),
+	}
 }
 
-// allowedDownloadSchemes restricts the URL schemes accepted by
-// validateDownloadURL. In production this is https only; tests override it to
-// include http when pointing at an httptest server.
-var allowedDownloadSchemes = map[string]bool{"https": true}
+// Release is the GitHub release shape for llama.cpp, shared with the
+// binaryrelease installer primitives.
+type Release = binaryrelease.Release
 
-type Release struct {
-	TagName string  `json:"tag_name"`
-	Name    string  `json:"name"`
-	Assets  []Asset `json:"assets"`
-}
-
-type Asset struct {
-	Name               string `json:"name"`
-	Size               int64  `json:"size"`
-	BrowserDownloadUrl string `json:"browser_download_url"`
-}
-
+// VersionInfo records what's installed in bin/version.json.
 type VersionInfo struct {
 	TagName     string `json:"tag_name"`
 	BinaryPath  string `json:"binary_path"`
@@ -191,32 +190,7 @@ func GetLatestVersion() (*Release, error) {
 // fetchRelease retrieves a release from the GitHub API at the given path
 // (e.g. "/releases/latest" or "/releases/tags/b8169").
 func fetchRelease(path string) (*Release, error) {
-	req, err := http.NewRequest("GET", apiBase+path, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	req.Header.Set("User-Agent", version.UserAgent())
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	var release Release
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return nil, err
-	}
-
-	return &release, nil
+	return binaryrelease.FetchLatestRelease(context.Background(), releaseConfig(), apiBase+path)
 }
 
 // resolveStableRelease maps a stable vX.Y.Z release to the b<number> release
@@ -241,7 +215,7 @@ func fetchNightlyTag(stable *Release) (string, error) {
 	var assetURL string
 	for _, asset := range stable.Assets {
 		if asset.Name == "nightly-tag.txt" {
-			assetURL = asset.BrowserDownloadUrl
+			assetURL = asset.BrowserDownloadURL
 			break
 		}
 	}
@@ -249,45 +223,9 @@ func fetchNightlyTag(stable *Release) (string, error) {
 		return "", fmt.Errorf("release has no nightly-tag.txt asset")
 	}
 
-	if err := validateDownloadURL(assetURL); err != nil {
-		return "", err
-	}
-
-	req, err := http.NewRequest("GET", assetURL, nil)
+	body, err := binaryrelease.FetchBytes(context.Background(), releaseConfig(), assetURL, maxNightlyTagBytes)
 	if err != nil {
-		return "", err
-	}
-	req.Header.Set("User-Agent", version.UserAgent())
-
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if err := validateDownloadURL(req.URL.String()); err != nil {
-				return fmt.Errorf("redirect blocked: %w", err)
-			}
-			if len(via) >= 10 {
-				return fmt.Errorf("too many redirects")
-			}
-			return nil
-		},
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return "", fmt.Errorf("HTTP %d fetching nightly-tag.txt: %s", resp.StatusCode, string(body))
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxNightlyTagBytes+1))
-	if err != nil {
-		return "", fmt.Errorf("read nightly-tag.txt: %w", err)
-	}
-	if int64(len(body)) > maxNightlyTagBytes {
-		return "", fmt.Errorf("nightly-tag.txt exceeds %d bytes", maxNightlyTagBytes)
+		return "", fmt.Errorf("fetch nightly-tag.txt: %w", err)
 	}
 
 	tag := strings.TrimSpace(string(body))
@@ -295,23 +233,6 @@ func fetchNightlyTag(stable *Release) (string, error) {
 		return "", fmt.Errorf("nightly-tag.txt contents %q are not a b<number> tag", tag)
 	}
 	return tag, nil
-}
-
-// validateDownloadURL rejects download URLs that don't use HTTPS and point to
-// a known GitHub release-asset host. Prevents a compromised API response from
-// redirecting the download to attacker-controlled infrastructure.
-func validateDownloadURL(rawURL string) error {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return fmt.Errorf("invalid download URL %q: %w", rawURL, err)
-	}
-	if !allowedDownloadSchemes[u.Scheme] {
-		return fmt.Errorf("download URL scheme %q is not allowed", u.Scheme)
-	}
-	if !allowedDownloadHosts[u.Hostname()] {
-		return fmt.Errorf("download URL host %q is not on the allowlist", u.Hostname())
-	}
-	return nil
 }
 
 func FindAssetForPlatform(release *Release) (string, string, error) {
@@ -322,90 +243,27 @@ func FindAssetForPlatform(release *Release) (string, string, error) {
 
 	for _, asset := range release.Assets {
 		if asset.Name == binaryPattern {
-			return asset.BrowserDownloadUrl, asset.Name, nil
+			return asset.BrowserDownloadURL, asset.Name, nil
 		}
 	}
 
 	return "", "", fmt.Errorf("could not find binary for platform %s", binaryPattern)
 }
 
-func DownloadBinary(downloadURL, destPath string, progress func(int64, int64)) error {
-	return DownloadBinaryContext(context.Background(), downloadURL, destPath, progress)
-}
-
-// DownloadBinaryContext is DownloadBinary with cancellation support. The
-// context is honored for connection setup and body streaming, so a canceled
-// context aborts an in-flight download promptly.
+// DownloadBinaryContext downloads a release asset to destPath, enforcing the
+// GitHub host/scheme allow-list and the package size cap. The context is
+// honored for connection setup and body streaming, so a canceled context
+// aborts an in-flight download promptly.
 func DownloadBinaryContext(ctx context.Context, downloadURL, destPath string, progress func(int64, int64)) error {
-	if err := validateDownloadURL(downloadURL); err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-
-	req.Header.Set("User-Agent", version.UserAgent())
-
-	// Use transport timeouts for connection setup, but no overall timeout for large downloads
-	transport := &http.Transport{
-		ResponseHeaderTimeout: 30 * time.Second,
-	}
-	client := &http.Client{
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if err := validateDownloadURL(req.URL.String()); err != nil {
-				return fmt.Errorf("redirect blocked: %w", err)
-			}
-			if len(via) >= 10 {
-				return fmt.Errorf("too many redirects")
-			}
-			return nil
-		},
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("download %s: %w", downloadURL, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: HTTP %d", downloadURL, resp.StatusCode)
-	}
-
-	if resp.ContentLength > maxDownloadBytes {
-		return fmt.Errorf("download %s: content-length %d exceeds max %d", downloadURL, resp.ContentLength, maxDownloadBytes)
-	}
-
-	tmpPath := destPath + ".partial"
-	out, err := os.Create(tmpPath)
-	if err != nil {
-		return fmt.Errorf("create %s: %w", tmpPath, err)
-	}
-	defer out.Close()
-
-	// Cap the body stream at maxDownloadBytes+1 so we can detect a truncated
-	// or header-lying response and reject it instead of filling the disk.
-	limited := io.LimitReader(resp.Body, maxDownloadBytes+1)
-	written, err := fileutil.StreamBody(limited, out, 0, resp.ContentLength, progress)
-	if err != nil {
-		return fmt.Errorf("write binary to %s: %w", tmpPath, err)
-	}
-	if written > maxDownloadBytes {
-		return fmt.Errorf("download %s exceeded max size of %d bytes", downloadURL, maxDownloadBytes)
-	}
-	out.Close()
-
-	if err := os.Rename(tmpPath, destPath); err != nil {
-		return fmt.Errorf("rename %s to %s: %w", tmpPath, destPath, err)
-	}
-	return nil
+	return binaryrelease.Download(ctx, releaseConfig(), downloadURL, destPath, progress)
 }
 
+// extractTarGz unpacks the release archive with the validating extractor
+// (no path traversal, no escaping or absolute symlinks, no setuid bits),
+// confirms the expected llama-<tag> directory, and atomically repoints
+// llama-current at it.
 func extractTarGz(archivePath, destDir, tagName string) error {
-	cmd := exec.Command("tar", "-xzf", archivePath, "-C", destDir)
-	if err := cmd.Run(); err != nil {
+	if err := binaryrelease.ExtractTarGz(archivePath, destDir); err != nil {
 		return fmt.Errorf("extract %s: %w", archivePath, err)
 	}
 
@@ -415,31 +273,7 @@ func extractTarGz(archivePath, destDir, tagName string) error {
 		return fmt.Errorf("expected directory %s not found in archive", llamaDirName)
 	}
 
-	return swapCurrentSymlink(destDir, llamaDirName)
-}
-
-// swapCurrentSymlink atomically points llama-current at target by staging a
-// temp symlink and renaming it over the destination. Avoids the ENOENT window
-// that a RemoveAll+Symlink pair would expose to concurrent exec.Command calls.
-func swapCurrentSymlink(destDir, target string) error {
-	currentLink := filepath.Join(destDir, "llama-current")
-	tmpLink := filepath.Join(destDir, ".llama-current.tmp")
-
-	// A stale tmp from a prior failed run would make Symlink fail with EEXIST.
-	_ = os.Remove(tmpLink)
-
-	if err := os.Symlink(target, tmpLink); err != nil {
-		return fmt.Errorf("failed to stage llama-current symlink: %w", err)
-	}
-	if err := os.Rename(tmpLink, currentLink); err != nil {
-		_ = os.Remove(tmpLink)
-		return fmt.Errorf("failed to activate llama-current symlink: %w", err)
-	}
-	return nil
-}
-
-func removeOldVersions(binDir, currentTag string) {
-	pruneOldVersions(binDir, currentTag, 0)
+	return binaryrelease.SwapCurrentSymlink(destDir, "llama-current", llamaDirName)
 }
 
 // pruneOldVersions deletes llama-b* version directories except (a) the one

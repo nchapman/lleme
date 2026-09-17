@@ -292,15 +292,27 @@ func modelNotFoundError(query string, suggestions []proxy.DownloadedModel) error
 	return fmt.Errorf("%s", b.String())
 }
 
+// preferredQuant resolves which quantization to pull when the user didn't
+// name one: an explicit huggingface.default_quant wins if the repo carries
+// it, otherwise lleme's built-in preference order decides.
+func preferredQuant(quants []hf.Quantization, defaultQuant string) string {
+	if defaultQuant != "" {
+		if _, found := hf.FindQuantization(quants, defaultQuant); found {
+			return defaultQuant
+		}
+	}
+	return hf.GetBestQuantization(quants)
+}
+
 // selectQuant returns the best matching quantization from the available list.
 // If quant is empty, it picks the best available; otherwise it validates the
 // requested quantization exists.
-func selectQuant(quants []hf.Quantization, quant string) (hf.Quantization, error) {
+func selectQuant(quants []hf.Quantization, quant, defaultQuant string) (hf.Quantization, error) {
 	if quant == "" {
-		name := hf.GetBestQuantization(quants)
+		name := preferredQuant(quants, defaultQuant)
 		q, found := hf.FindQuantization(quants, name)
 		if !found {
-			return hf.Quantization{}, fmt.Errorf("internal error: best quantization %q not found in list", name)
+			return hf.Quantization{}, fmt.Errorf("internal error: quantization %q not found in list", name)
 		}
 		return q, nil
 	}
@@ -344,7 +356,7 @@ func offerToPull(cfg *config.Config, user, repo, quant string) (*proxy.Downloade
 		return nil, fmt.Errorf("'%s/%s' contains no GGUF files", user, repo)
 	}
 
-	selectedQuant, err := selectQuant(quants, quant)
+	selectedQuant, err := selectQuant(quants, quant, cfg.HuggingFace.DefaultQuant)
 	if err != nil {
 		return nil, err
 	}
@@ -444,8 +456,12 @@ func ensureProxyRunning(cfg *config.Config) (string, error) {
 	}
 
 	if err := cmd.Start(); err != nil {
+		log.Close()
 		return "", fmt.Errorf("failed to start proxy: %w", err)
 	}
+	// The child holds its own dup of the descriptor; drop the parent's copy
+	// so long-lived TUI sessions don't leak it.
+	defer log.Close()
 
 	// Wait for proxy to become ready
 	proxyURL := fmt.Sprintf("http://%s:%d", host, port)

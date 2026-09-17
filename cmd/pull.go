@@ -70,24 +70,12 @@ Examples:
 		}
 
 		// Find the quantization to use
-		var selectedQuant hf.Quantization
-		if quant == "" {
-			quant = hf.GetBestQuantization(quants)
-			selectedQuant, _ = hf.FindQuantization(quants, quant)
-		} else {
-			var found bool
-			selectedQuant, found = hf.FindQuantization(quants, quant)
-			if !found {
-				ui.PrintError("Quantization '%s' not found", quant)
-				fmt.Println("\nAvailable quantizations:")
-				client.FetchFolderQuantSizes(user, repo, "main", quants)
-				for _, q := range hf.SortQuantizations(quants) {
-					fmt.Printf("  • %s (%s)\n", q.Name, ui.FormatBytes(q.Size))
-				}
-				ui.ExitFunc(1)
-				return
-			}
+		selectedQuant, err := selectQuant(quants, quant, cfg.HuggingFace.DefaultQuant)
+		if err != nil {
+			ui.Fatal("%v", err)
+			return
 		}
+		quant = selectedQuant.Name
 
 		// Check if local files are up to date with remote manifest
 		upToDate, saveManifest, _, manifestJSON, err := hf.CheckForUpdates(client, user, repo, selectedQuant)

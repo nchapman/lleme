@@ -31,6 +31,8 @@ var SetOptions = []SetOptionDef{
 	{Name: "top-k", Description: "Top-K sampling (integer)"},
 	{Name: "min-p", Description: "Min-P sampling (0.0-1.0)"},
 	{Name: "repeat-penalty", Description: "Repeat penalty (0.0-2.0)"},
+	{Name: "presence-penalty", Description: "Presence penalty (-2.0-2.0)"},
+	{Name: "frequency-penalty", Description: "Frequency penalty (-2.0-2.0)"},
 	{Name: "ctx-size", Description: "Context size (requires /reload)"},
 	{Name: "gpu-layers", Description: "GPU layers (requires /reload)"},
 	{Name: "threads", Description: "CPU threads (requires /reload)"},

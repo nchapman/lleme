@@ -170,6 +170,44 @@ func Download(ctx context.Context, cfg Config, downloadURL, destPath string, pro
 	return nil
 }
 
+// FetchBytes GETs rawURL under cfg's allowlist policy and returns at most
+// maxBytes of body. An oversized body is an error, never a truncation;
+// maxBytes must be positive. Redirects are revalidated against cfg via the
+// shared client, so the allow-list holds end-to-end.
+func FetchBytes(ctx context.Context, cfg Config, rawURL string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 || maxBytes >= (1<<62) {
+		return nil, fmt.Errorf("maxBytes %d out of range", maxBytes)
+	}
+	if err := ValidateURL(cfg, rawURL); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.UserAgent != "" {
+		req.Header.Set("User-Agent", cfg.UserAgent)
+	}
+
+	resp, err := newClient(cfg).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, fmt.Errorf("body exceeds %d bytes", maxBytes)
+	}
+	return body, nil
+}
+
 // newClient builds the HTTP client used for every outbound request. The
 // CheckRedirect hook re-runs ValidateURL on each hop so the allow-list holds
 // across redirects; transport-level ResponseHeaderTimeout bounds connection

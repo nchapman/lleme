@@ -182,8 +182,3 @@ func (w *RotatingWriter) rotateUnlocked() error {
 	w.bytesWritten = 0
 	return nil
 }
-
-// Path returns the base path of the log file.
-func (w *RotatingWriter) Path() string {
-	return w.basePath
-}

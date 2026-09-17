@@ -44,9 +44,10 @@ type (
 
 	// CommandResultMsg is the result of a slash command
 	CommandResultMsg struct {
-		Message string
-		IsError bool
-		Exit    bool
+		Message  string
+		IsError  bool
+		Exit     bool
+		Reloaded bool // /reload succeeded; clear pendingReload
 	}
 )
 
@@ -333,6 +334,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:gocognit,cyc
 		if msg.Exit {
 			m.quitting = true
 			return m, tea.Quit
+		}
+		if msg.Reloaded {
+			m.pendingReload = false
 		}
 		if msg.Message != "" {
 			role := components.RoleSystem

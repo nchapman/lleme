@@ -32,26 +32,16 @@ type Client struct {
 type ModelInfo struct {
 	ModelId      string      `json:"modelId"`
 	Author       string      `json:"author"`
-	CreatedAt    time.Time   `json:"createdAt"`
 	LastModified time.Time   `json:"lastModified"`
-	Private      bool        `json:"private"`
 	Gated        GatedStatus `json:"gated"`
 	Downloads    int64       `json:"downloads"`
 	Likes        int64       `json:"likes"`
-	Siblings     []Sibling   `json:"siblings"`
 	Tags         []string    `json:"tags"`
 	CardData     CardData    `json:"cardData"`
 }
 
-type Sibling struct {
-	RFileName string `json:"rfilename"`
-	Size      int64  `json:"size"`
-}
-
 type CardData struct {
-	License   string   `json:"license"`
-	BaseModel any      `json:"base_model"` // Can be string or []string
-	Tags      []string `json:"tags"`
+	License string `json:"license"`
 }
 
 // FileTreeLFS contains LFS metadata for a file in the tree API response.
@@ -73,7 +63,6 @@ type SearchResult struct {
 	ID           string      `json:"id"` // Full model ID: "author/repo"
 	Author       string      `json:"author"`
 	LastModified time.Time   `json:"lastModified"`
-	Private      bool        `json:"private"`
 	Gated        GatedStatus `json:"gated"`
 	Downloads    int64       `json:"downloads"`
 	Likes        int64       `json:"likes"`

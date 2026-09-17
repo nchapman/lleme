@@ -2,6 +2,9 @@ package cmd
 
 import (
 	"os"
+	"os/exec"
+	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/nchapman/lleme/internal/proxy"
@@ -26,6 +29,51 @@ func TestStopServerNotRunning(t *testing.T) {
 	}
 	if stopped {
 		t.Error("stopServer() returned true when server was not running")
+	}
+}
+
+// TestStopServerPIDReuse guards the PID-reuse hazard: a stale state file
+// whose PID now belongs to an unrelated live process must not be signaled.
+func TestStopServerPIDReuse(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep not available")
+	}
+	tmpDir := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", oldHome)
+	os.Setenv("HOME", tmpDir)
+
+	victim := exec.Command("sleep", "10")
+	if err := victim.Start(); err != nil {
+		t.Fatalf("spawn victim: %v", err)
+	}
+	defer func() {
+		_ = victim.Process.Kill()
+		_ = victim.Wait()
+	}()
+
+	state := &proxy.ProxyState{
+		PID:  victim.Process.Pid, // Live PID that is NOT a lleme process
+		Host: "127.0.0.1",
+		Port: 11313,
+	}
+	if err := proxy.SaveProxyState(state); err != nil {
+		t.Fatalf("Failed to save state: %v", err)
+	}
+
+	stopped, err := stopServer()
+	if err == nil || !strings.Contains(err.Error(), "stale state file") {
+		t.Errorf("stopServer() err = %v, want stale state file rejection", err)
+	}
+	if stopped {
+		t.Error("stopServer() must not report stopping a reused PID")
+	}
+	if proxy.GetRunningProxyState() != nil {
+		t.Error("stopServer() should clear the stale state file")
+	}
+	// The innocent process must have survived.
+	if err := victim.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Error("reused-PID victim was killed by stopServer()")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -123,6 +124,9 @@ Use --host, --port, and --max-models to change the server's binding on restart.`
 		if err := validateServerFlags(); err != nil {
 			ui.Fatal("%v", err)
 		}
+		if err := ensureLlamaBackend(); err != nil {
+			ui.Fatal("%v", err)
+		}
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 		stopped, _ := stopServer()
@@ -149,6 +153,13 @@ func stopServer() (bool, error) {
 			port = serverPort
 		}
 		return stopServerByPort(port)
+	}
+
+	// Guard against PID reuse: if the OS recycled the stale PID after a
+	// crash, signaling it would kill an innocent process.
+	if !isLlemeProcess(state.PID) {
+		proxy.ClearProxyState()
+		return false, fmt.Errorf("stale state file (PID %d is not a lleme server); cleared it", state.PID)
 	}
 
 	process, err := os.FindProcess(state.PID)
@@ -230,14 +241,26 @@ func findProcessOnPort(port int) int {
 	return pid
 }
 
-// isLlemeProcess checks if the given PID is a lleme process.
+// isLlemeProcess reports whether the given PID belongs to a lleme binary.
+// Matches the executable name exactly (comm=) rather than substring-matching
+// the full args, so a recycled PID running e.g. "tail -f .../lleme/logs/..."
+// isn't mistaken for the server. Accepts the installed name ("lleme") or the
+// basename of this running executable, so dev builds can stop their own
+// daemons. Mirrors the exact-match discipline of cmdlineMatchesBackend in
+// internal/proxy/state.go.
 func isLlemeProcess(pid int) bool {
-	cmd := exec.Command("ps", "-p", fmt.Sprintf("%d", pid), "-o", "args=")
-	output, err := cmd.Output()
+	out, err := exec.Command("ps", "-p", fmt.Sprintf("%d", pid), "-o", "comm=").Output()
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(output), "lleme")
+	comm := strings.TrimSpace(string(out))
+	if comm == "lleme" {
+		return true
+	}
+	if exe, err := os.Executable(); err == nil {
+		return comm == filepath.Base(exe)
+	}
+	return false
 }
 
 func startServerForeground() {

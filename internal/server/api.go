@@ -128,39 +128,6 @@ func (api *APIClient) Health() error {
 	return checkResponse(resp, "health check")
 }
 
-func (api *APIClient) ChatCompletion(req *ChatCompletionRequest) (*ChatCompletionResponse, error) {
-	url := fmt.Sprintf("%s/v1/chat/completions", api.baseURL)
-
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-
-	httpReq, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := api.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if err := checkResponse(resp, "chat completion"); err != nil {
-		return nil, err
-	}
-
-	var response ChatCompletionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-
-	return &response, nil
-}
-
 // StreamCallback holds callbacks for streaming chat completion responses.
 // ContentCallback is called for regular response content.
 // ReasoningCallback is called for reasoning/thinking content (optional).
@@ -260,12 +227,6 @@ func (api *APIClient) StopModel(model string) error {
 	return api.postJSON(fmt.Sprintf("%s/api/stop", api.baseURL), struct {
 		Model string `json:"model"`
 	}{Model: model}, "stop model")
-}
-
-func (api *APIClient) SetModel(modelPath string) error {
-	return api.postJSON(fmt.Sprintf("%s/v1/load", api.baseURL), struct {
-		Model string `json:"model"`
-	}{Model: modelPath}, "load model")
 }
 
 func (api *APIClient) postJSON(url string, payload any, operation string) error {

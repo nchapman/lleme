@@ -163,8 +163,8 @@ func TestOpenInEditorCreatesDefaultConfig(t *testing.T) {
 	}
 
 	// Verify default values
-	if loaded.HuggingFace.DefaultQuant != "Q4_K_M" {
-		t.Errorf("Expected default_quant Q4_K_M, got %s", loaded.HuggingFace.DefaultQuant)
+	if loaded.HuggingFace.DefaultQuant != "" {
+		t.Errorf("Expected empty default_quant, got %s", loaded.HuggingFace.DefaultQuant)
 	}
 }
 
@@ -286,8 +286,8 @@ func TestResetToDefaults(t *testing.T) {
 
 	content := string(data)
 	// Check for default values in template
-	if !strings.Contains(content, "default_quant: Q4_K_M") {
-		t.Error("Expected reset config to contain default_quant: Q4_K_M")
+	if !strings.Contains(content, `default_quant: ""`) {
+		t.Error("Expected reset config to contain empty default_quant")
 	}
 	if !strings.Contains(content, "# threads:") {
 		t.Error("Expected reset config to contain commented options")

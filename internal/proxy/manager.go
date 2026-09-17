@@ -342,9 +342,7 @@ func (m *ModelManager) shutdownBackend(modelName string, backend *Backend) error
 	m.mu.Lock()
 	backend.SetStatus(BackendStopped)
 	backend.CloseReadyChan()
-	if backend.LogWriter != nil {
-		backend.LogWriter.Close()
-	}
+	backend.CloseLogWriter()
 	m.portAllocator.Release(backend.Port)
 	delete(m.backends, modelName)
 	m.removeLRU(modelName)
@@ -434,13 +432,13 @@ func (m *ModelManager) startBackend(backend *Backend) {
 		backend.SetStatus(BackendStopped)
 		return
 	}
-	backend.LogWriter = logWriter
+	backend.SetLogWriter(logWriter)
 
 	cmd.Stdout = logWriter
 	cmd.Stderr = logWriter
 
 	if err := cmd.Start(); err != nil {
-		logWriter.Close()
+		backend.CloseLogWriter()
 		backend.SetStatus(BackendStopped)
 		return
 	}
@@ -451,7 +449,7 @@ func (m *ModelManager) startBackend(backend *Backend) {
 	if err := m.waitForReady(backend); err != nil {
 		backend.SetStatus(BackendStopped)
 		cmd.Process.Kill()
-		logWriter.Close()
+		backend.CloseLogWriter()
 		return
 	}
 

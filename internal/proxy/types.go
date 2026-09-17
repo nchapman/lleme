@@ -36,6 +36,8 @@ func (s BackendStatus) String() string {
 
 // Backend represents a running server instance for a specific model.
 // The serving process is produced by its Runtime (llama-server today).
+// Fields mutated after publication (Process, logWriter, Status, ...) are
+// accessed under b.mu via accessor methods.
 type Backend struct {
 	mu           sync.RWMutex
 	ModelName    string         // Full model reference: "bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M"
@@ -43,7 +45,7 @@ type Backend struct {
 	Runtime      Runtime        // Strategy for starting/health-checking this backend (exposes Kind())
 	Port         int            // Port this backend is listening on
 	Process      *os.Process    // The backend server process
-	LogWriter    io.WriteCloser // Log file writer for this backend
+	logWriter    io.WriteCloser // Log file writer for this backend
 	LastActivity time.Time      // Last time a request was made to this backend
 	StartedAt    time.Time      // When this backend was started
 	Status       BackendStatus  // Current status
@@ -60,18 +62,30 @@ func (b *Backend) CloseReadyChan() {
 	})
 }
 
-// UpdateActivity updates the last activity time for this backend
-func (b *Backend) UpdateActivity() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.LastActivity = time.Now()
-}
-
 // GetLastActivity returns the last activity time
 func (b *Backend) GetLastActivity() time.Time {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.LastActivity
+}
+
+// SetLogWriter assigns the backend's log writer. The writer is created in
+// the startBackend goroutine after the Backend has been published, so the
+// field must be written under the lock.
+func (b *Backend) SetLogWriter(w io.WriteCloser) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.logWriter = w
+}
+
+// CloseLogWriter closes and detaches the log writer if one is attached.
+func (b *Backend) CloseLogWriter() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.logWriter != nil {
+		b.logWriter.Close()
+		b.logWriter = nil
+	}
 }
 
 // GetStatus returns the current status

@@ -55,6 +55,12 @@ func (d *Downloader) DownloadModel(user, repo, branch, filename, destPath string
 	}
 	defer resp.Body.Close()
 
+	// A 200 means the server ignored the Range header and is sending the
+	// full body; account from zero or the resume arithmetic double-counts.
+	if resp.StatusCode == http.StatusOK {
+		existing = 0
+	}
+
 	totalSize := existing + resp.ContentLength
 	sizeCap, err := enforceSizeCap(filename, expectedSize, totalSize)
 	if err != nil {
